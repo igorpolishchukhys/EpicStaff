@@ -10,12 +10,27 @@ import {
     DocumentStateMessage,
     isCursorMovedMessage,
     isDocumentStateMessage,
+    isLockDeniedMessage,
+    isLockGrantedMessage,
+    isLockStateMessage,
+    isNodeDataUpdatedMessage,
+    isNodeLockedMessage,
     isNodeMovedMessage,
+    isNodeUnlockedMessage,
     isPresenceMessage,
     isSelectionChangedMessage,
     isSelfIdentityMessage,
+    LockDeniedMessage,
+    LockGrantedMessage,
+    LockReleaseOp,
+    LockRequestOp,
+    LockStateMessage,
+    NodeDataUpdatedMessage,
+    NodeDataUpdateOp,
+    NodeLockedMessage,
     NodeMovedMessage,
     NodeMoveOp,
+    NodeUnlockedMessage,
     PresenceParticipant,
     SelectionChangedMessage,
     SelectionOp,
@@ -36,6 +51,12 @@ export class CollaborationPresenceService {
     readonly documentState$: Observable<DocumentStateMessage>;
     readonly remoteCursor$: Observable<CursorMovedMessage>;
     readonly remoteSelection$: Observable<SelectionChangedMessage>;
+    readonly lockGranted$: Observable<LockGrantedMessage>;
+    readonly lockDenied$: Observable<LockDeniedMessage>;
+    readonly nodeLocked$: Observable<NodeLockedMessage>;
+    readonly nodeUnlocked$: Observable<NodeUnlockedMessage>;
+    readonly lockState$: Observable<LockStateMessage>;
+    readonly remoteNodeDataUpdate$: Observable<NodeDataUpdatedMessage>;
 
     // --- Private fields ---
     private readonly authService = inject(AuthService);
@@ -45,6 +66,12 @@ export class CollaborationPresenceService {
     private readonly documentStateSubject = new Subject<DocumentStateMessage>();
     private readonly remoteCursorSubject = new Subject<CursorMovedMessage>();
     private readonly remoteSelectionSubject = new Subject<SelectionChangedMessage>();
+    private readonly lockGrantedSubject = new Subject<LockGrantedMessage>();
+    private readonly lockDeniedSubject = new Subject<LockDeniedMessage>();
+    private readonly nodeLockedSubject = new Subject<NodeLockedMessage>();
+    private readonly nodeUnlockedSubject = new Subject<NodeUnlockedMessage>();
+    private readonly lockStateSubject = new Subject<LockStateMessage>();
+    private readonly remoteNodeDataUpdateSubject = new Subject<NodeDataUpdatedMessage>();
 
     private socket: WebSocket | null = null;
     private connectedFlowId: number | null = null;
@@ -56,6 +83,12 @@ export class CollaborationPresenceService {
         this.documentState$ = this.documentStateSubject.asObservable();
         this.remoteCursor$ = this.remoteCursorSubject.asObservable();
         this.remoteSelection$ = this.remoteSelectionSubject.asObservable();
+        this.lockGranted$ = this.lockGrantedSubject.asObservable();
+        this.lockDenied$ = this.lockDeniedSubject.asObservable();
+        this.nodeLocked$ = this.nodeLockedSubject.asObservable();
+        this.nodeUnlocked$ = this.nodeUnlockedSubject.asObservable();
+        this.lockState$ = this.lockStateSubject.asObservable();
+        this.remoteNodeDataUpdate$ = this.remoteNodeDataUpdateSubject.asObservable();
     }
 
     // --- Public methods ---
@@ -122,6 +155,50 @@ export class CollaborationPresenceService {
             type: 'selection_changed',
             flow_id: this.connectedFlowId,
             node_ids: operation.node_ids,
+        });
+
+        this.socket.send(message);
+    }
+
+    sendLockRequest(operation: LockRequestOp): void {
+        if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
+            return;
+        }
+
+        const message = JSON.stringify({
+            type: 'lock_request',
+            flow_id: this.connectedFlowId,
+            node_id: operation.node_id,
+        });
+
+        this.socket.send(message);
+    }
+
+    sendLockRelease(operation: LockReleaseOp): void {
+        if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
+            return;
+        }
+
+        const message = JSON.stringify({
+            type: 'lock_release',
+            flow_id: this.connectedFlowId,
+            node_id: operation.node_id,
+        });
+
+        this.socket.send(message);
+    }
+
+    sendNodeDataUpdate(operation: NodeDataUpdateOp): void {
+        if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
+            return;
+        }
+
+        const message = JSON.stringify({
+            type: 'node_data_updated',
+            flow_id: this.connectedFlowId,
+            node_id: operation.node_id,
+            node_name: operation.node_name,
+            data: operation.data,
         });
 
         this.socket.send(message);
@@ -223,6 +300,36 @@ export class CollaborationPresenceService {
 
         if (isSelfIdentityMessage(parsed)) {
             this.selfMemberId.set(parsed.member_id);
+            return;
+        }
+
+        if (isLockGrantedMessage(parsed)) {
+            this.lockGrantedSubject.next(parsed);
+            return;
+        }
+
+        if (isLockDeniedMessage(parsed)) {
+            this.lockDeniedSubject.next(parsed);
+            return;
+        }
+
+        if (isNodeLockedMessage(parsed)) {
+            this.nodeLockedSubject.next(parsed);
+            return;
+        }
+
+        if (isNodeUnlockedMessage(parsed)) {
+            this.nodeUnlockedSubject.next(parsed);
+            return;
+        }
+
+        if (isLockStateMessage(parsed)) {
+            this.lockStateSubject.next(parsed);
+            return;
+        }
+
+        if (isNodeDataUpdatedMessage(parsed)) {
+            this.remoteNodeDataUpdateSubject.next(parsed);
             return;
         }
     }

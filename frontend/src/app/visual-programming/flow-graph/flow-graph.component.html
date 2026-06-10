@@ -108,6 +108,7 @@
                     [remoteSelection]="
                         node.backendId != null ? (remoteNodeSelectionMap().get(node.backendId) ?? null) : null
                     "
+                    [remoteLock]="node.backendId != null ? (remoteNodeLockMap().get(node.backendId) ?? null) : null"
                     fNode
                     fDragHandle
                     [fNodeId]="node.id"

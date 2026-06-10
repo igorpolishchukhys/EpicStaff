@@ -63,6 +63,7 @@ import { FlowNodeVariablesOverlayComponent } from './flow-node-variables-overlay
     host: {
         '[class]': 'getNodeClass()',
         '[style.--remote-selection-color]': 'remoteSelection()?.color ?? null',
+        '[style.--remote-lock-color]': 'remoteLock()?.color ?? null',
     },
 })
 export class FlowBaseNodeComponent {
@@ -83,6 +84,13 @@ export class FlowBaseNodeComponent {
      * (the default) to show no remote-selection indicator.
      */
     readonly remoteSelection = input<{ color: string; displayName: string } | null>(null);
+
+    /**
+     * When a remote collaborator currently holds the panel lock on this node, pass
+     * `{color, displayName}` here. A dashed lock-outline and a lock badge will be
+     * shown. Pass `null` (the default) to show no lock indicator.
+     */
+    readonly remoteLock = input<{ color: string; displayName: string } | null>(null);
 
     @Output() projectExpandToggled = new EventEmitter<ProjectNodeModel>();
     @Output() portMouseenter = new EventEmitter<void>();

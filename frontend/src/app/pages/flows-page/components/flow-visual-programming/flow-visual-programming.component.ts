@@ -217,6 +217,20 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
             this.flowGraphComponent?.applyRemoteNodeMove(msg.node_id, { x: msg.x, y: msg.y });
         });
 
+        // Collaboration: apply remote node data updates — filter self-echoes, guard flow_id.
+        this.collaborationPresenceService.remoteNodeDataUpdate$
+            .pipe(takeUntilDestroyed(this.destroyRef))
+            .subscribe((msg) => {
+                if (msg.origin === this.collaborationPresenceService.selfMemberId()) {
+                    return;
+                }
+                const currentId = this.graphState()?.id;
+                if (msg.flow_id !== currentId) {
+                    return;
+                }
+                this.flowGraphComponent?.applyRemoteNodeDataUpdate(msg.node_id, msg.node_name, msg.data);
+            });
+
         // Collaboration: buffer document_state until the flow canvas is loaded, then apply.
         this.collaborationPresenceService.documentState$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((msg) => {
             const currentId = this.graphState()?.id;

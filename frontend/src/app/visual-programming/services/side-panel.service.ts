@@ -1,8 +1,9 @@
-import { computed, Injectable, Signal, signal } from '@angular/core';
+import { computed, inject, Injectable, Signal, signal } from '@angular/core';
 import { Observable, Subject } from 'rxjs';
 
 import { NodeModel } from '../core/models/node.model';
 import { FlowService } from './flow.service';
+import { PanelLockService } from './panel-lock.service';
 
 @Injectable({
     providedIn: 'root',
@@ -25,6 +26,9 @@ export class SidePanelService {
 
     public readonly selectedNodeId: Signal<string | null> = this.selectedNodeIdSignal.asReadonly();
 
+    private readonly flowService = inject(FlowService);
+    private readonly panelLockService = inject(PanelLockService);
+
     public readonly selectedNode: Signal<NodeModel | null> = computed(() => {
         const selectedId = this.selectedNodeId();
         if (!selectedId) {
@@ -43,33 +47,61 @@ export class SidePanelService {
         this.expandRequestSignal.set(false);
     }
 
-    constructor(private readonly flowService: FlowService) {}
-
-    public trySelectNode(node: NodeModel): Promise<boolean> {
+    /**
+     * Attempts to select a node and open its side panel.
+     *
+     * Lock rules:
+     *  - If the target node has a backendId and another participant holds the lock,
+     *    returns false without opening the panel (caller shows the denial toast).
+     *  - If the same node is already selected, returns true immediately (idempotent).
+     *  - When switching to a new node: autosave + release previous lock (if any),
+     *    then select the new node and request its lock (if it has a backendId).
+     */
+    public trySelectNode(node: NodeModel): boolean {
         const currentId = this.selectedNodeIdSignal();
 
         if (currentId === node.id) {
-            return Promise.resolve(true);
+            return true;
         }
+
+        // Lock-denied guard: if another participant holds the lock, refuse.
+        if (typeof node.backendId === 'number') {
+            const holder = this.panelLockService.lockedByOther(node.backendId);
+            if (holder !== null) {
+                return false;
+            }
+        }
+
+        // Release lock on the previously held node before moving to the next one.
+        this._releaseCurrentLockIfHeld();
 
         this.triggerAutosave();
         this.setSelectedNodeId(node.id);
-        return Promise.resolve(true);
+
+        // Request lock for the newly selected node.
+        if (typeof node.backendId === 'number') {
+            this.panelLockService.requestLock(node.backendId);
+        }
+
+        return true;
     }
 
-    public tryClosePanel(): Promise<boolean> {
+    public tryClosePanel(): boolean {
         const currentId = this.selectedNodeIdSignal();
 
         if (!currentId) {
-            return Promise.resolve(true);
+            return true;
         }
 
         this.triggerAutosave();
         this.clearSelection();
-        return Promise.resolve(true);
+        return true;
     }
 
     public clearSelection(): void {
+        // Release lock before clearing — the node is still available via selectedNode
+        // at this point because we clear the signal after.
+        this._releaseCurrentLockIfHeld();
         this.selectedNodeIdSignal.set(null);
     }
 
@@ -99,5 +131,38 @@ export class SidePanelService {
 
     public clearNodeSaving(): void {
         this.savingNodeIdSignal.set(null);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Private helpers
+    // ---------------------------------------------------------------------------
+
+    /**
+     * Releases the lock held by THIS client, if any.
+     * Safe to call multiple times — the guard inside releaseLock is idempotent
+     * (only releases when heldNodeId matches). This method adds a second guard at
+     * the service layer: it only sends a release when the currently selected node
+     * has a backendId that matches the held lock.
+     *
+     * "Release-never-twice" guarantee:
+     *  1. `PanelLockService.releaseLock` clears `heldNodeId` optimistically on the
+     *     first call, so any subsequent call where heldNodeId no longer matches is
+     *     a no-op at the PanelLockService level.
+     *  2. This method additionally checks the currently selected node's backendId
+     *     against the PanelLockService heldNodeId, so it only ever releases when
+     *     there is an actual held lock to release.
+     */
+    private _releaseCurrentLockIfHeld(): void {
+        const heldNodeId = this.panelLockService.heldNodeId();
+        if (heldNodeId === null) {
+            return;
+        }
+        // Only release when the held id matches a current selection context.
+        // This prevents stale releases if setSelectedNodeId was called directly
+        // without going through trySelectNode.
+        const currentNode = this.selectedNode();
+        if (currentNode !== null && typeof currentNode.backendId === 'number' && currentNode.backendId === heldNodeId) {
+            this.panelLockService.releaseLock(heldNodeId);
+        }
     }
 }

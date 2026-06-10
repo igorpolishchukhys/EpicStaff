@@ -441,3 +441,49 @@
     z-index: 10;
     box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
 }
+
+// ---------------------------------------------------------------------------
+// Remote panel-lock outline + badge
+// ---------------------------------------------------------------------------
+
+/*
+ * When --remote-lock-color is set (by the remoteLock input via host binding),
+ * the node gets a dashed outline in the lock-holder's color — visually distinct
+ * from the solid remote-selection outline.
+ */
+:host:has(.remote-lock-badge) {
+    outline: 2px dashed var(--remote-lock-color);
+    outline-offset: 3px;
+    border-radius: 16px;
+}
+
+.remote-lock-badge {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background-color: var(--remote-lock-color);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 10;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+
+    i {
+        font-size: 10px;
+        flex-shrink: 0;
+    }
+
+    &__name {
+        max-width: 80px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+}

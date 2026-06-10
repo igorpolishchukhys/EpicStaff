@@ -45,7 +45,15 @@ from application.collab_socket_registry import CollabSocketRegistry
 from application.presence_service import PresenceService
 from application.live_document_service import LiveDocumentService
 from application.cursor_service import CursorService
-from domain.models.collab_messages import NodeMovedIn, CursorMovedIn, SelectionChangedIn
+from application.lock_service import LockService
+from domain.models.collab_messages import (
+    NodeMovedIn,
+    CursorMovedIn,
+    SelectionChangedIn,
+    LockRequestIn,
+    LockReleaseIn,
+    NodeDataUpdatedIn,
+)
 from pydantic import ValidationError
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -93,6 +101,7 @@ live_document_service = LiveDocumentService(
     registry=collab_registry, repository=live_document_repository
 )
 cursor_service = CursorService(registry=collab_registry)
+lock_service = LockService(registry=collab_registry)
 
 _voice_settings_cache: dict | None = None
 _voice_settings_cache_time: float = 0.0
@@ -342,6 +351,16 @@ async def collab_presence(
             }
         )
 
+        # Send the current lock state immediately after the self frame so the
+        # joining client knows which nodes are already locked by other members.
+        await websocket.send_json(
+            {
+                "type": "lock_state",
+                "flow_id": flow_id,
+                "locks": lock_service.lock_state(flow_id),
+            }
+        )
+
         while True:
             raw = await websocket.receive_text()
             try:
@@ -373,6 +392,51 @@ async def collab_presence(
                         origin_member_id=member_id,
                         user_id=user_id,
                     )
+                elif msg_type == "lock_request":
+                    frame = LockRequestIn(**data)
+                    await lock_service.acquire(
+                        flow_id=frame.flow_id,
+                        node_id=frame.node_id,
+                        member_id=member_id,
+                        user_id=user_id,
+                        websocket=websocket,
+                    )
+                elif msg_type == "lock_release":
+                    frame = LockReleaseIn(**data)
+                    await lock_service.release(
+                        flow_id=frame.flow_id,
+                        node_id=frame.node_id,
+                        member_id=member_id,
+                    )
+                elif msg_type == "node_data_updated":
+                    frame = NodeDataUpdatedIn(**data)
+                    # Best-effort: a release racing this broadcast is accepted by
+                    # design — no locking needed here.
+                    current_holder = lock_service.holder(frame.flow_id, frame.node_id)
+                    if (
+                        current_holder is not None
+                        and current_holder["member_id"] == member_id
+                    ):
+                        await collab_registry.broadcast_json(
+                            frame.flow_id,
+                            {
+                                "type": "node_data_updated",
+                                "flow_id": frame.flow_id,
+                                "node_id": frame.node_id,
+                                "node_name": frame.node_name,
+                                "data": frame.data,
+                                "origin": member_id,
+                            },
+                        )
+                    else:
+                        logger.warning(
+                            "collab_presence: node_data_updated dropped — "
+                            "sender is not the lock holder "
+                            "flow={} node={} member={}",
+                            frame.flow_id,
+                            frame.node_id,
+                            member_id,
+                        )
                 else:
                     logger.warning(
                         "collab_presence: unknown frame type={} flow={} member={}",
