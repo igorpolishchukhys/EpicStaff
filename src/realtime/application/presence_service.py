@@ -34,7 +34,7 @@ class PresenceService:
         # Maps websocket → {"user_id": int, "display_name": str | None}
         self._identity: dict[WebSocket, dict] = {}
         # Wire registry to call _forget for any socket dropped during broadcast.
-        self._registry.set_on_drop(self._forget)
+        self._registry.add_on_drop(self._forget)
 
     def _forget(self, websocket: WebSocket) -> None:
         """Remove identity tracking for a socket dropped by the registry."""

@@ -98,6 +98,21 @@ export class SidePanelService {
         return true;
     }
 
+    /**
+     * Closes the panel after an INVOLUNTARY lock loss (the server already
+     * released the lock — e.g. auto-release after the holder disconnected).
+     *
+     * Unlike tryClosePanel/clearSelection this path:
+     *  - sends NO lock-release frame — the server no longer recognises the lock,
+     *    and PanelLockService has already cleared heldNodeId when it detected
+     *    the loss;
+     *  - skips autosave — unsaved edits are intentionally discarded
+     *    (last-write-wins; the server is already rejecting this holder's writes).
+     */
+    public closePanelOnLockLoss(): void {
+        this.selectedNodeIdSignal.set(null);
+    }
+
     public clearSelection(): void {
         // Release lock before clearing — the node is still available via selectedNode
         // at this point because we clear the signal after.

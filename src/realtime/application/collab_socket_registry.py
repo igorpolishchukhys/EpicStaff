@@ -13,19 +13,21 @@ class CollabSocketRegistry:
     shared across ``PresenceService`` and ``LiveDocumentService`` so that
     both use the same source of truth.
 
-    An optional ``on_drop`` callback may be registered via ``set_on_drop``.
-    It is called once for every dead socket removed during ``broadcast_json``,
-    allowing ``PresenceService`` to purge its ``_identity`` map without the
-    registry importing any application-layer type.
+    Any number of ``on_drop`` callbacks may be registered via ``add_on_drop``.
+    Each one is called once for every dead socket removed during
+    ``broadcast_json``, allowing ``PresenceService`` to purge its
+    ``_identity`` map and ``LockService`` cleanup to release the dropped
+    holder's locks (EST-9) without the registry importing any
+    application-layer type.
     """
 
     def __init__(self) -> None:
         self._sockets: dict[int, set[WebSocket]] = {}
-        self._on_drop: Callable[[WebSocket], None] | None = None
+        self._on_drop_callbacks: list[Callable[[WebSocket], None]] = []
 
-    def set_on_drop(self, callback: Callable[[WebSocket], None]) -> None:
+    def add_on_drop(self, callback: Callable[[WebSocket], None]) -> None:
         """Register a callback that fires for each dead socket dropped during broadcast."""
-        self._on_drop = callback
+        self._on_drop_callbacks.append(callback)
 
     def register(self, flow_id: int, websocket: WebSocket) -> None:
         """Add ``websocket`` to the registry for ``flow_id``."""
@@ -71,7 +73,7 @@ class CollabSocketRegistry:
             if surviving is not None:
                 for ws in dead:
                     surviving.discard(ws)
-                    if self._on_drop is not None:
-                        self._on_drop(ws)
+                    for callback in self._on_drop_callbacks:
+                        callback(ws)
                 if not surviving:
                     del self._sockets[flow_id]

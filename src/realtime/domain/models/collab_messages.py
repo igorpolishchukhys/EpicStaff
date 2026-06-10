@@ -62,6 +62,22 @@ class NodeDataUpdatedIn(BaseModel):
     data: dict
 
 
+class HeartbeatIn(BaseModel):
+    """Inbound keep-alive frame sent by a client every 10s (EST-9).
+
+    Frozen contract (FE built against these field names):
+        {"type": "heartbeat", "flow_id": <int>}
+
+    Answered directly to the sender (not broadcast) with:
+        {"type": "heartbeat_ack", "flow_id": <int>}
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    flow_id: int
+
+
 class CursorMovedIn(BaseModel):
     """Inbound frame sent by a client when the cursor moves on the canvas.
 
