@@ -67,7 +67,12 @@ import { NodeType } from '../core/enums/node-type';
 import { computeAutoArrangePositions } from '../core/helpers/auto-arrange.util';
 import { BackwardArcPathBuilder, computeBackwardArcPoints } from '../core/helpers/backward-arc.path-builder';
 import { getMinimapClassForNode } from '../core/helpers/get-minimap-class.util';
-import { defineSourceTargetPair, isBackwardConnection, isConnectionValid } from '../core/helpers/helpers';
+import {
+    defineSourceTargetPair,
+    generatePortsForNode,
+    isBackwardConnection,
+    isConnectionValid,
+} from '../core/helpers/helpers';
 import {
     findNearestFreePosition,
     getCollisionBounds,
@@ -92,6 +97,7 @@ import { CollabPresentationService } from '../services/collab-presentation.servi
 import { FlowService } from '../services/flow.service';
 import { FlowSettingsService } from '../services/flow-settings.service';
 import { NodeFactoryService } from '../services/node-factory.service';
+import { PanelLockService } from '../services/panel-lock.service';
 import { SidePanelService } from '../services/side-panel.service';
 import { UndoRedoService } from '../services/undo-redo.service';
 import { createFlowConnection } from '../utils/connection.factory';
@@ -243,6 +249,7 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     private readonly injector = inject(Injector);
     private readonly collaborationPresenceService = inject(CollaborationPresenceService);
     readonly collabPresentation = inject(CollabPresentationService);
+    private readonly panelLockService = inject(PanelLockService);
 
     /** Ids of nodes currently being dragged by the local user — used to ignore echo moves. */
     private readonly locallyDraggingNodeIds = new Set<string>();
@@ -256,6 +263,27 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
      * Consumed in the template to pass `remoteSelection` to each node.
      */
     protected readonly remoteNodeSelectionMap = computed(() => this.collabPresentation.nodeSelectionMap());
+
+    /**
+     * Derived computed: backendNodeId → {color, displayName} for remote panel locks.
+     * Excludes the lock held by the local user (that node is open locally).
+     * Consumed in the template to pass `remoteLock` to each node.
+     */
+    protected readonly remoteNodeLockMap = computed((): Map<number, { color: string; displayName: string }> => {
+        const result = new Map<number, { color: string; displayName: string }>();
+        const participants = this.collaborationPresenceService.participants();
+        for (const [nodeId, entry] of this.panelLockService.locks()) {
+            // Skip locks held by this client.
+            const selfId = this.collaborationPresenceService.selfMemberId();
+            if (selfId !== null && entry.memberId === selfId) {
+                continue;
+            }
+            const displayName = this.collabPresentation.resolveDisplayName(entry.userId, participants);
+            const color = this.collabPresentation.getColorForUserId(entry.userId);
+            result.set(nodeId, { color, displayName });
+        }
+        return result;
+    });
 
     constructor() {
         // Subscribe to remote cursor moves — filter self-echoes, guard flow_id.
@@ -290,6 +318,28 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             const liveIds = new Set(participants.map((p) => p.user_id));
             this.collabPresentation.pruneToUsers(liveIds);
         });
+
+        // Lock denied: rollback — close the open panel without saving if the denied
+        // node is the one currently open, then notify the user who holds the lock.
+        this.collaborationPresenceService.lockDenied$.pipe(takeUntilDestroyed()).subscribe((msg) => {
+            const openNode = this.sidePanelService.selectedNode();
+            if (openNode !== null && openNode.backendId === msg.node_id) {
+                // Close without saving: clear the selection directly (bypasses autosave).
+                this.sidePanelService.setSelectedNodeId(null);
+
+                const participants = this.collaborationPresenceService.participants();
+                const holderName = this.collabPresentation.resolveDisplayName(msg.holder_user_id, participants);
+                this.toastService.error(`Node is locked by ${holderName}`);
+            }
+        });
+
+        // Remote node data update: apply to local flow state.
+        this.collaborationPresenceService.remoteNodeDataUpdate$.pipe(takeUntilDestroyed()).subscribe((msg) => {
+            if (msg.origin === this.collaborationPresenceService.selfMemberId()) {
+                return;
+            }
+            this.applyRemoteNodeDataUpdate(msg.node_id, msg.node_name, msg.data);
+        });
     }
 
     public ngOnInit(): void {
@@ -315,6 +365,7 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
         this.destroy$.next();
         this.destroy$.complete();
         this.collabPresentation.clear();
+        this.panelLockService.clear();
     }
 
     public onInitialized(): void {
@@ -665,7 +716,15 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
                 }
             });
         } else {
-            void this.sidePanelService.trySelectNode(node);
+            const selected = this.sidePanelService.trySelectNode(node);
+            if (!selected && typeof node.backendId === 'number') {
+                const holder = this.panelLockService.lockedByOther(node.backendId);
+                if (holder !== null) {
+                    const participants = this.collaborationPresenceService.participants();
+                    const holderName = this.collabPresentation.resolveDisplayName(holder.userId, participants);
+                    this.toastService.error(`Node is being edited by ${holderName}`);
+                }
+            }
         }
     }
 
@@ -673,6 +732,17 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
         const normalizedNode = normalizeTableNodeSize(updatedNode);
         this.flowService.updateNode(normalizedNode);
         const movedNodeIds = this.resolveTableOverlaps(normalizedNode);
+
+        // Broadcast data change to collaborators before clearing the selection
+        // (which triggers lock release).
+        if (typeof normalizedNode.backendId === 'number') {
+            this.collaborationPresenceService.sendNodeDataUpdate({
+                node_id: normalizedNode.backendId,
+                node_name: normalizedNode.node_name,
+                data: normalizedNode.data as Record<string, unknown>,
+            });
+        }
+
         this.sidePanelService.clearSelection();
 
         setTimeout(() => {
@@ -694,6 +764,15 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
         const normalizedNode = normalizeTableNodeSize(updatedNode);
         this.flowService.updateNode(normalizedNode);
         const movedNodeIds = this.resolveTableOverlaps(normalizedNode);
+
+        // Broadcast autosave data to collaborators.
+        if (typeof normalizedNode.backendId === 'number') {
+            this.collaborationPresenceService.sendNodeDataUpdate({
+                node_id: normalizedNode.backendId,
+                node_name: normalizedNode.node_name,
+                data: normalizedNode.data as Record<string, unknown>,
+            });
+        }
 
         setTimeout(() => {
             this.rerouteSegmentConnections();
@@ -1005,6 +1084,30 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
         }
     }
 
+    /**
+     * Applies a remote node-data update broadcast by another participant after they
+     * saved or autosaved a node panel.
+     *
+     * Resolves backendNodeId → local node, regenerates ports from the incoming data,
+     * then delegates to FlowService.applyRemoteNodeData (immutable signal update, no
+     * undo, no decision-table sync).
+     *
+     * If the updated node's panel is open locally it means two users edited the same
+     * node simultaneously — the lock system prevents this (only one holder at a time).
+     * The comment is preserved here as a safety note.
+     */
+    public applyRemoteNodeDataUpdate(backendNodeId: number, nodeName: string, data: Record<string, unknown>): void {
+        const node = this.flowService.nodes().find((n) => n.backendId === backendNodeId);
+        if (!node) {
+            return;
+        }
+
+        const newPorts = generatePortsForNode(node.id, node.type, data);
+        this.flowService.applyRemoteNodeData(node.id, nodeName, data, newPorts);
+        this.cd.detectChanges();
+        this.fFlowComponent?.redraw();
+    }
+
     public onZoomInNode(node: NodeModel): void {
         this.fCanvasComponent.centerGroupOrNode(node.id, true);
     }
@@ -1272,7 +1375,21 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     }
 
     public openNodePanel(nodeId: string): void {
-        this.sidePanelService.setSelectedNodeId(nodeId);
+        const node = this.flowService.nodes().find((n) => n.id === nodeId);
+        if (!node) {
+            return;
+        }
+        // Route through trySelectNode so lock checks are applied even for deep-link opens.
+        const selected = this.sidePanelService.trySelectNode(node);
+        if (!selected && typeof node.backendId === 'number') {
+            const holder = this.panelLockService.lockedByOther(node.backendId);
+            if (holder !== null) {
+                const participants = this.collaborationPresenceService.participants();
+                const holderName = this.collabPresentation.resolveDisplayName(holder.userId, participants);
+                this.toastService.error(`Node is being edited by ${holderName}`);
+            }
+            return;
+        }
         afterNextRender(() => this.nodePanelShell?.expandPanel(), { injector: this.injector });
     }
 

@@ -206,6 +206,31 @@ export class FlowService {
     }
 
     /**
+     * Applies a remote node-data update received via the collaboration WebSocket.
+     * Sets `node_name`, `data`, and `ports` on the node identified by `localNodeId`.
+     *
+     * Intentionally bypasses undo/redo, decision-table connection-sync, and all
+     * other side effects — remote data updates are not local user actions.
+     */
+    public applyRemoteNodeData(
+        localNodeId: string,
+        nodeName: string,
+        data: Record<string, unknown>,
+        ports: ViewPort[]
+    ): void {
+        this.flowSignal.update((flow: FlowModel) => {
+            const index = flow.nodes.findIndex((n) => n.id === localNodeId);
+            if (index < 0) {
+                return flow;
+            }
+            const updatedNodes: NodeModel[] = [...flow.nodes];
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            updatedNodes[index] = { ...flow.nodes[index], node_name: nodeName, data: data as any, ports };
+            return { ...flow, nodes: updatedNodes };
+        });
+    }
+
+    /**
      * Updates only the position of a single node in the flow signal.
      * Used exclusively for remote collaboration moves — does NOT touch undo/redo,
      * does NOT trigger decision-table connection-sync logic, and does NOT emit

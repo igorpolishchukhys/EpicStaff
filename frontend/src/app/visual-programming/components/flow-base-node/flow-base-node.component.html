@@ -154,3 +154,9 @@
 @if (remoteSelection(); as sel) {
     <div class="remote-selection-badge">{{ sel.displayName }}</div>
 }
+@if (remoteLock(); as lock) {
+    <div class="remote-lock-badge">
+        <i class="ti ti-lock"></i>
+        <span class="remote-lock-badge__name">{{ lock.displayName }}</span>
+    </div>
+}
