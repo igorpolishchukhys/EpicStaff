@@ -19,6 +19,11 @@ class PresenceService:
 
     Public join/leave semantics and the presence message shape are frozen
     by the EST-2 tests — do not change them.
+
+    EST-3: identity tracking added.  Each connection carries
+    ``{"user_id": int, "display_name": str | None}``.  The broadcast
+    payload gains a ``participants`` list — one entry per live socket
+    (frontend deduplicates by user_id to build the avatar stack).
     """
 
     def __init__(
@@ -26,12 +31,27 @@ class PresenceService:
     ) -> None:
         self._repository = repository
         self._registry = registry
+        # Maps websocket → {"user_id": int, "display_name": str | None}
+        self._identity: dict[WebSocket, dict] = {}
+        # Wire registry to call _forget for any socket dropped during broadcast.
+        self._registry.set_on_drop(self._forget)
 
-    async def join(self, flow_id: int, websocket: WebSocket) -> str:
+    def _forget(self, websocket: WebSocket) -> None:
+        """Remove identity tracking for a socket dropped by the registry."""
+        self._identity.pop(websocket, None)
+
+    async def join(
+        self,
+        flow_id: int,
+        websocket: WebSocket,
+        user_id: int,
+        display_name: str | None = None,
+    ) -> str:
         """Register a new connection for flow_id.
 
         Returns the opaque member_id (uuid4 hex) assigned to this connection.
-        Broadcasts the updated count to all connections on the flow.
+        Broadcasts the updated count and participant list to all connections
+        on the flow.
         """
         member_id = uuid.uuid4().hex
 
@@ -40,6 +60,7 @@ class PresenceService:
         await self._repository.add_member(flow_id, member_id)
 
         self._registry.register(flow_id, websocket)
+        self._identity[websocket] = {"user_id": user_id, "display_name": display_name}
 
         await self._broadcast(flow_id)
 
@@ -53,6 +74,7 @@ class PresenceService:
         Safe to call even if the socket was already removed.
         """
         self._registry.unregister(flow_id, websocket)
+        self._identity.pop(websocket, None)
 
         await self._repository.remove_member(flow_id, member_id)
         await self._broadcast(flow_id)
@@ -62,5 +84,18 @@ class PresenceService:
     async def _broadcast(self, flow_id: int) -> None:
         """SCARD the flow's Redis set and fan-out to all live sockets."""
         count = await self._repository.count(flow_id)
-        payload = {"type": "presence", "flow_id": flow_id, "count": count}
+
+        # Build participants from the live sockets for this flow.
+        participants = [
+            self._identity[ws]
+            for ws in self._registry.sockets_for(flow_id)
+            if ws in self._identity
+        ]
+
+        payload = {
+            "type": "presence",
+            "flow_id": flow_id,
+            "count": count,
+            "participants": participants,
+        }
         await self._registry.broadcast_json(flow_id, payload)

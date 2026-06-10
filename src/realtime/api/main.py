@@ -310,7 +310,12 @@ async def collab_presence(
     await websocket.accept()
     member_id: str | None = None
     try:
-        member_id = await presence_service.join(flow_id, websocket)
+        member_id = await presence_service.join(
+            flow_id,
+            websocket,
+            user_id=user_info.get("user_id"),
+            display_name=user_info.get("display_name"),
+        )
         logger.info("collab_presence: accepted flow={} member={}", flow_id, member_id)
 
         # Send the current document state to the joining socket only.

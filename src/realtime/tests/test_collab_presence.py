@@ -6,6 +6,11 @@ Covers all four acceptance criteria:
   AC3 – one disconnect → remaining client receives count 1
   AC4 – connections on different flow_ids are fully isolated
 
+EST-3 additions:
+  AC6 – two connections with different identities → participants contains both
+  AC7 – identity removed after leave
+  AC8 – count is correct alongside participants
+
 The test module builds a minimal FastAPI app around the real
 ``PresenceService`` + ``PresenceRepository`` backed by a FakeRedis client.
 It never imports ``api.main`` or ``utils.auth`` (which require env vars and
@@ -72,7 +77,12 @@ def _build_app(
         await websocket.accept()
         member_id: str | None = None
         try:
-            member_id = await presence_service.join(flow_id, websocket)
+            member_id = await presence_service.join(
+                flow_id,
+                websocket,
+                user_id=user_info.get("user_id"),
+                display_name=user_info.get("display_name"),
+            )
             while True:
                 await websocket.receive_text()
         except WebSocketDisconnect:
@@ -94,6 +104,20 @@ def _valid_introspect(token: str) -> dict | None:
 
 def _invalid_introspect(token: str) -> dict | None:
     return None
+
+
+def _assert_presence_msg(msg: dict, *, flow_id: int, count: int) -> None:
+    """Assert the presence-message fields that are stable under EST-2 contracts.
+
+    Pins the exact envelope shape so stray keys are caught immediately.
+    The EST-3 ``participants`` field is additive — assert its type but not its
+    exact contents here (dedicated AC6/AC7/AC8 tests cover that).
+    """
+    assert set(msg.keys()) == {"type", "flow_id", "count", "participants"}
+    assert msg["type"] == "presence"
+    assert msg["flow_id"] == flow_id
+    assert msg["count"] == count
+    assert isinstance(msg["participants"], list)
 
 
 # ---------------------------------------------------------------------------
@@ -160,25 +184,17 @@ class TestTwoClientsOnSameFlow:
             ) as ws1:
                 # First join → count 1 (only ws1 in the flow).
                 msg1 = json.loads(ws1.receive_text())
-                assert msg1 == {"type": "presence", "flow_id": 10, "count": 1}
+                _assert_presence_msg(msg1, flow_id=10, count=1)
 
                 with client.websocket_connect(
                     "/realtime/collab/?flow_id=10&token=t"
                 ) as ws2:
                     # ws2 just joined — it receives its own join broadcast.
                     msg_ws2 = json.loads(ws2.receive_text())
-                    assert msg_ws2 == {
-                        "type": "presence",
-                        "flow_id": 10,
-                        "count": 2,
-                    }
+                    _assert_presence_msg(msg_ws2, flow_id=10, count=2)
                     # ws1 also received the broadcast when ws2 joined.
                     msg_ws1_update = json.loads(ws1.receive_text())
-                    assert msg_ws1_update == {
-                        "type": "presence",
-                        "flow_id": 10,
-                        "count": 2,
-                    }
+                    _assert_presence_msg(msg_ws1_update, flow_id=10, count=2)
 
 
 # ---------------------------------------------------------------------------
@@ -212,11 +228,7 @@ class TestDisconnectDecrementsCount:
                 # ws2 context exited → disconnect → `leave` fires → count drops to 1.
                 # ws1 must receive the decremented count.
                 leave_msg = json.loads(ws1.receive_text())
-                assert leave_msg == {
-                    "type": "presence",
-                    "flow_id": 20,
-                    "count": 1,
-                }
+                _assert_presence_msg(leave_msg, flow_id=20, count=1)
 
 
 # ---------------------------------------------------------------------------
@@ -238,22 +250,14 @@ class TestFlowIsolation:
             ) as ws_flow_100:
                 # flow 100 starts at 1.
                 msg_100 = json.loads(ws_flow_100.receive_text())
-                assert msg_100 == {
-                    "type": "presence",
-                    "flow_id": 100,
-                    "count": 1,
-                }
+                _assert_presence_msg(msg_100, flow_id=100, count=1)
 
                 with client.websocket_connect(
                     "/realtime/collab/?flow_id=200&token=t"
                 ) as ws_flow_200:
                     # flow 200 starts independently at 1.
                     msg_200 = json.loads(ws_flow_200.receive_text())
-                    assert msg_200 == {
-                        "type": "presence",
-                        "flow_id": 200,
-                        "count": 1,
-                    }
+                    _assert_presence_msg(msg_200, flow_id=200, count=1)
 
                 # ws_flow_200 disconnected: flow 200 count drops to 0.
                 # Verify Redis counts reflect isolation.
@@ -319,4 +323,177 @@ class TestJoinRedisFailure:
             ) as ws_ok:
                 msg = json.loads(ws_ok.receive_text())
                 # Redis has exactly 1 member; local count matches.
-                assert msg == {"type": "presence", "flow_id": 42, "count": 1}
+                _assert_presence_msg(msg, flow_id=42, count=1)
+
+
+# ---------------------------------------------------------------------------
+# AC6 – two connections with different identities → participants contains both
+# ---------------------------------------------------------------------------
+
+
+class TestParticipantsIdentity:
+    """EST-3: presence broadcast carries per-connection identity."""
+
+    def _make_user_introspect(self, user_id: int, display_name: str | None):
+        def introspect(token: str) -> dict | None:
+            return {
+                "active": True,
+                "user_id": user_id,
+                "display_name": display_name,
+            }
+
+        return introspect
+
+    def test_two_connections_participants_contains_both_identities(self):
+        repo = _make_fake_repo()
+        registry = CollabSocketRegistry()
+        service = PresenceService(repository=repo, registry=registry)
+
+        # Build an app that routes by token value to different identities.
+        app = FastAPI()
+        users = {
+            "token-alice": {"active": True, "user_id": 10, "display_name": "Alice"},
+            "token-bob": {"active": True, "user_id": 20, "display_name": "Bob"},
+        }
+
+        @app.websocket("/realtime/collab/")
+        async def collab(
+            websocket: WebSocket,
+            flow_id: int | None = None,
+            token: str | None = None,
+        ):
+            if not token or token not in users:
+                await websocket.close(code=1008)
+                return
+            if flow_id is None:
+                await websocket.close(code=1008)
+                return
+            await websocket.accept()
+            user_info = users[token]
+            member_id: str | None = None
+            try:
+                member_id = await service.join(
+                    flow_id,
+                    websocket,
+                    user_id=user_info.get("user_id"),
+                    display_name=user_info.get("display_name"),
+                )
+                while True:
+                    await websocket.receive_text()
+            except WebSocketDisconnect:
+                pass
+            finally:
+                if member_id is not None:
+                    await service.leave(flow_id, websocket, member_id)
+
+        with TestClient(app) as client:
+            with client.websocket_connect(
+                "/realtime/collab/?flow_id=300&token=token-alice"
+            ) as ws_alice:
+                # Alice joins → count 1, participants = [Alice].
+                msg_alice_join = json.loads(ws_alice.receive_text())
+                assert msg_alice_join["count"] == 1
+                assert msg_alice_join["participants"] == [
+                    {"user_id": 10, "display_name": "Alice"}
+                ]
+
+                with client.websocket_connect(
+                    "/realtime/collab/?flow_id=300&token=token-bob"
+                ) as ws_bob:
+                    # Bob joins → count 2, both receive updated participants.
+                    msg_bob_join = json.loads(ws_bob.receive_text())
+                    assert msg_bob_join["count"] == 2
+                    assert len(msg_bob_join["participants"]) == 2
+
+                    # Alice also receives the broadcast.
+                    msg_alice_update = json.loads(ws_alice.receive_text())
+                    assert msg_alice_update["count"] == 2
+                    assert len(msg_alice_update["participants"]) == 2
+
+                    # Both participants present with correct fields.
+                    user_ids = {p["user_id"] for p in msg_alice_update["participants"]}
+                    assert user_ids == {10, 20}
+                    display_names = {
+                        p["display_name"] for p in msg_alice_update["participants"]
+                    }
+                    assert display_names == {"Alice", "Bob"}
+
+    def test_identity_removed_after_leave(self):
+        repo = _make_fake_repo()
+        registry = CollabSocketRegistry()
+        service = PresenceService(repository=repo, registry=registry)
+
+        app = FastAPI()
+        users = {
+            "token-alice": {"active": True, "user_id": 10, "display_name": "Alice"},
+            "token-bob": {"active": True, "user_id": 20, "display_name": "Bob"},
+        }
+
+        @app.websocket("/realtime/collab/")
+        async def collab(
+            websocket: WebSocket,
+            flow_id: int | None = None,
+            token: str | None = None,
+        ):
+            if not token or token not in users:
+                await websocket.close(code=1008)
+                return
+            if flow_id is None:
+                await websocket.close(code=1008)
+                return
+            await websocket.accept()
+            user_info = users[token]
+            member_id: str | None = None
+            try:
+                member_id = await service.join(
+                    flow_id,
+                    websocket,
+                    user_id=user_info.get("user_id"),
+                    display_name=user_info.get("display_name"),
+                )
+                while True:
+                    await websocket.receive_text()
+            except WebSocketDisconnect:
+                pass
+            finally:
+                if member_id is not None:
+                    await service.leave(flow_id, websocket, member_id)
+
+        with TestClient(app) as client:
+            with client.websocket_connect(
+                "/realtime/collab/?flow_id=400&token=token-alice"
+            ) as ws_alice:
+                ws_alice.receive_text()  # Alice join broadcast
+
+                with client.websocket_connect(
+                    "/realtime/collab/?flow_id=400&token=token-bob"
+                ) as ws_bob:
+                    ws_bob.receive_text()  # Bob join broadcast
+                    ws_alice.receive_text()  # Alice receives Bob's join broadcast
+
+                # Bob disconnected — Alice must get a leave broadcast.
+                leave_msg = json.loads(ws_alice.receive_text())
+                assert leave_msg["count"] == 1
+                # Only Alice's identity remains.
+                assert leave_msg["participants"] == [
+                    {"user_id": 10, "display_name": "Alice"}
+                ]
+
+    def test_display_name_null_is_preserved_in_participants(self):
+        """display_name=None is preserved as null in the participants list."""
+        repo = _make_fake_repo()
+        registry = CollabSocketRegistry()
+        service = PresenceService(repository=repo, registry=registry)
+
+        def introspect_no_display(token: str) -> dict | None:
+            return {"active": True, "user_id": 5, "display_name": None}
+
+        app = _build_app(service, introspect_no_display)
+
+        with TestClient(app) as client:
+            with client.websocket_connect(
+                "/realtime/collab/?flow_id=500&token=t"
+            ) as ws:
+                msg = json.loads(ws.receive_text())
+                assert msg["count"] == 1
+                assert msg["participants"] == [{"user_id": 5, "display_name": None}]

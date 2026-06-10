@@ -49,6 +49,7 @@ class TokenIntrospectResponseSerializer(serializers.Serializer):
     user_id = serializers.IntegerField(required=False)
     email = serializers.EmailField(required=False)
     scopes = serializers.ListField(child=serializers.CharField(), required=False)
+    display_name = serializers.CharField(allow_null=True, required=False)
 
 
 # ---- API-key validate ----
