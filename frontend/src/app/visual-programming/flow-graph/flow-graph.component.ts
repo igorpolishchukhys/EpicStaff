@@ -42,6 +42,7 @@ import {
 } from '@foblex/flow';
 import { Subject } from 'rxjs';
 
+import { CollaborationPresenceService } from '../../services/collaboration/collaboration-presence.service';
 import { ToastService } from '../../services/notifications/toast.service';
 import { AppSvgIconComponent } from '../../shared/components/app-svg-icon/app-svg-icon.component';
 import { DomainDialogComponent } from '../components/domain-dialog/domain-dialog.component';
@@ -234,6 +235,12 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     private readonly dialog = inject(Dialog);
     private readonly toastService = inject(ToastService);
     private readonly injector = inject(Injector);
+    private readonly collaborationPresenceService = inject(CollaborationPresenceService);
+
+    /** Ids of nodes currently being dragged by the local user — used to ignore echo moves. */
+    private readonly locallyDraggingNodeIds = new Set<string>();
+    /** Timestamp of the last throttled node_moved op sent per node id, for ~50 ms trailing throttle. */
+    private readonly lastMoveSentAt = new Map<string, number>();
 
     constructor() {}
 
@@ -692,7 +699,10 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
 
         const dragData = event.data as FDragNodeStartEventData | undefined;
         if (dragData?.fNodeIds) {
-            dragData.fNodeIds.forEach((id: string) => this.draggingElements.add(id));
+            dragData.fNodeIds.forEach((id: string) => {
+                this.draggingElements.add(id);
+                this.locallyDraggingNodeIds.add(id);
+            });
         }
 
         this.undoRedoService.stateChanged();
@@ -832,9 +842,27 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
                 this.flowService.updateNode({ ...current, position: freePos });
                 autoAlignedNodeIds.add(id);
             }
+
+            // Send one final authoritative op with the collision-snapped position.
+            if (typeof current.backendId === 'number') {
+                const finalPos =
+                    freePos.x !== current.position.x || freePos.y !== current.position.y ? freePos : current.position;
+                this.collaborationPresenceService.sendNodeMove({
+                    node_id: current.backendId,
+                    x: finalPos.x,
+                    y: finalPos.y,
+                });
+                this.lastMoveSentAt.delete(id);
+            }
         }
 
         this.draggedNodeIds.clear();
+
+        // Release drag lock after the final ops are sent so inbound self-echoes
+        // (which will arrive asynchronously) are treated as idempotent.
+        for (const id of this.locallyDraggingNodeIds) {
+            this.locallyDraggingNodeIds.delete(id);
+        }
 
         setTimeout(() => {
             this.isDragging = false;
@@ -858,15 +886,74 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             this.undoRedoService.stateChanged();
         }
 
+        const snappedX = this.snapToGrid(newPos.x);
+        const snappedY = this.snapToGrid(newPos.y);
+
         const updatedNode = {
             ...node,
-            position: {
-                x: this.snapToGrid(newPos.x),
-                y: this.snapToGrid(newPos.y),
-            },
+            position: { x: snappedX, y: snappedY },
         };
 
         this.flowService.updateNode(updatedNode);
+
+        // Send throttled collaboration op (~50 ms trailing throttle via timestamp check).
+        if (typeof node.backendId === 'number') {
+            const now = Date.now();
+            const lastSent = this.lastMoveSentAt.get(node.id) ?? 0;
+            if (now - lastSent >= 50) {
+                this.lastMoveSentAt.set(node.id, now);
+                this.collaborationPresenceService.sendNodeMove({
+                    node_id: node.backendId,
+                    x: snappedX,
+                    y: snappedY,
+                });
+            }
+        }
+    }
+
+    /**
+     * Applies a single remote node-move operation.  Resolves the backend id to
+     * the local node, skips if the node is currently being dragged by the local
+     * user, then updates the canvas.
+     */
+    public applyRemoteNodeMove(backendNodeId: number, position: { x: number; y: number }): void {
+        const node = this.flowService.nodes().find((n) => n.backendId === backendNodeId);
+        if (!node) {
+            return;
+        }
+        if (this.locallyDraggingNodeIds.has(node.id)) {
+            return;
+        }
+        this.flowService.applyRemotePosition(node.id, position);
+        this.cd.detectChanges();
+        this.fFlowComponent?.redraw();
+    }
+
+    /**
+     * Bulk-applies document state positions (called once after the flow loads).
+     * Skips nodes currently being dragged locally; triggers one redraw at the end.
+     */
+    public applyDocumentState(positions: Record<string, { x: number; y: number }>): void {
+        let anyApplied = false;
+        for (const [backendIdStr, pos] of Object.entries(positions)) {
+            const backendId = Number(backendIdStr);
+            if (!Number.isFinite(backendId)) {
+                continue;
+            }
+            const node = this.flowService.nodes().find((n) => n.backendId === backendId);
+            if (!node) {
+                continue;
+            }
+            if (this.locallyDraggingNodeIds.has(node.id)) {
+                continue;
+            }
+            this.flowService.applyRemotePosition(node.id, pos);
+            anyApplied = true;
+        }
+        if (anyApplied) {
+            this.cd.detectChanges();
+            this.fFlowComponent?.redraw();
+        }
     }
 
     public onZoomInNode(node: NodeModel): void {

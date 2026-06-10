@@ -205,6 +205,24 @@ export class FlowService {
         }
     }
 
+    /**
+     * Updates only the position of a single node in the flow signal.
+     * Used exclusively for remote collaboration moves — does NOT touch undo/redo,
+     * does NOT trigger decision-table connection-sync logic, and does NOT emit
+     * any events.
+     */
+    public applyRemotePosition(localNodeId: string, position: { x: number; y: number }): void {
+        this.flowSignal.update((flow: FlowModel) => {
+            const index = flow.nodes.findIndex((n) => n.id === localNodeId);
+            if (index < 0) {
+                return flow;
+            }
+            const updatedNodes: NodeModel[] = [...flow.nodes];
+            updatedNodes[index] = { ...flow.nodes[index], position };
+            return { ...flow, nodes: updatedNodes };
+        });
+    }
+
     public updateNodesInBatch(nodes: NodeModel[]): void {
         if (!nodes || nodes.length === 0) {
             return;
