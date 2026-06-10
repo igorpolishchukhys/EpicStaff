@@ -2,8 +2,6 @@
 
 :host {
     position: relative;
-    background-color: red;
-
     background: var(--color-nodes-background);
 
     border-radius: 16px;
@@ -408,3 +406,38 @@
 }
 
 // Overlay visuals moved to app-flow-node-variables-overlay component
+
+// ---------------------------------------------------------------------------
+// Remote collaborator selection outline + name badge
+// ---------------------------------------------------------------------------
+
+/*
+ * When --remote-selection-color is set (by the remoteSelection input via host
+ * binding), the node's border reflects the remote user's presence color.
+ * The badge absolutely-positions the display name just above the node.
+ */
+:host:has(.remote-selection-badge) {
+    outline: 2px solid var(--remote-selection-color);
+    outline-offset: 2px;
+    border-radius: 16px;
+}
+
+.remote-selection-badge {
+    position: absolute;
+    bottom: calc(100% + 4px);
+    left: 50%;
+    transform: translateX(-50%);
+    background-color: var(--remote-selection-color);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    white-space: nowrap;
+    max-width: 100px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+    z-index: 10;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}

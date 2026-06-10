@@ -151,3 +151,6 @@
         [showVariables]="showVariables"
     ></app-flow-node-variables-overlay>
 }
+@if (remoteSelection(); as sel) {
+    <div class="remote-selection-badge">{{ sel.displayName }}</div>
+}

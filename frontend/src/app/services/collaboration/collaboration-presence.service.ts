@@ -5,13 +5,20 @@ import { AuthService } from '../auth/auth.service';
 import { ConfigService } from '../config/config.service';
 import {
     CollabConnectionState,
+    CursorMovedMessage,
+    CursorMoveOp,
     DocumentStateMessage,
+    isCursorMovedMessage,
     isDocumentStateMessage,
     isNodeMovedMessage,
     isPresenceMessage,
+    isSelectionChangedMessage,
+    isSelfIdentityMessage,
     NodeMovedMessage,
     NodeMoveOp,
     PresenceParticipant,
+    SelectionChangedMessage,
+    SelectionOp,
 } from './collab-message.model';
 
 const RECONNECT_DELAY_MS = 3_000;
@@ -22,10 +29,13 @@ export class CollaborationPresenceService {
     readonly participantCount = signal<number>(0);
     readonly participants = signal<PresenceParticipant[]>([]);
     readonly connectionState = signal<CollabConnectionState>('disconnected');
+    readonly selfMemberId = signal<string | null>(null);
 
     // --- Observables ---
     readonly remoteNodeMove$: Observable<NodeMovedMessage>;
     readonly documentState$: Observable<DocumentStateMessage>;
+    readonly remoteCursor$: Observable<CursorMovedMessage>;
+    readonly remoteSelection$: Observable<SelectionChangedMessage>;
 
     // --- Private fields ---
     private readonly authService = inject(AuthService);
@@ -33,6 +43,8 @@ export class CollaborationPresenceService {
 
     private readonly remoteNodeMoveSubject = new Subject<NodeMovedMessage>();
     private readonly documentStateSubject = new Subject<DocumentStateMessage>();
+    private readonly remoteCursorSubject = new Subject<CursorMovedMessage>();
+    private readonly remoteSelectionSubject = new Subject<SelectionChangedMessage>();
 
     private socket: WebSocket | null = null;
     private connectedFlowId: number | null = null;
@@ -42,6 +54,8 @@ export class CollaborationPresenceService {
     constructor() {
         this.remoteNodeMove$ = this.remoteNodeMoveSubject.asObservable();
         this.documentState$ = this.documentStateSubject.asObservable();
+        this.remoteCursor$ = this.remoteCursorSubject.asObservable();
+        this.remoteSelection$ = this.remoteSelectionSubject.asObservable();
     }
 
     // --- Public methods ---
@@ -64,6 +78,7 @@ export class CollaborationPresenceService {
         this.participantCount.set(0);
         this.participants.set([]);
         this.connectionState.set('disconnected');
+        this.selfMemberId.set(null);
         this.connectedFlowId = null;
     }
 
@@ -78,6 +93,35 @@ export class CollaborationPresenceService {
             node_id: operation.node_id,
             x: operation.x,
             y: operation.y,
+        });
+
+        this.socket.send(message);
+    }
+
+    sendCursor(operation: CursorMoveOp): void {
+        if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
+            return;
+        }
+
+        const message = JSON.stringify({
+            type: 'cursor_moved',
+            flow_id: this.connectedFlowId,
+            x: operation.x,
+            y: operation.y,
+        });
+
+        this.socket.send(message);
+    }
+
+    sendSelection(operation: SelectionOp): void {
+        if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
+            return;
+        }
+
+        const message = JSON.stringify({
+            type: 'selection_changed',
+            flow_id: this.connectedFlowId,
+            node_ids: operation.node_ids,
         });
 
         this.socket.send(message);
@@ -102,6 +146,7 @@ export class CollaborationPresenceService {
         this.intentionalClose = false;
         this.connectedFlowId = flowId;
         this.connectionState.set('connecting');
+        this.selfMemberId.set(null);
 
         const webSocket = new WebSocket(url);
         this.socket = webSocket;
@@ -163,6 +208,21 @@ export class CollaborationPresenceService {
 
         if (isDocumentStateMessage(parsed)) {
             this.documentStateSubject.next(parsed);
+            return;
+        }
+
+        if (isCursorMovedMessage(parsed)) {
+            this.remoteCursorSubject.next(parsed);
+            return;
+        }
+
+        if (isSelectionChangedMessage(parsed)) {
+            this.remoteSelectionSubject.next(parsed);
+            return;
+        }
+
+        if (isSelfIdentityMessage(parsed)) {
+            this.selfMemberId.set(parsed.member_id);
             return;
         }
     }

@@ -5,6 +5,7 @@ import {
     ChangeDetectorRef,
     Component,
     computed,
+    effect,
     ElementRef,
     EventEmitter,
     inject,
@@ -19,6 +20,7 @@ import {
     SimpleChanges,
     ViewChild,
 } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormsModule } from '@angular/forms';
 import { IPoint, PointExtensions } from '@foblex/2d';
 import {
@@ -37,6 +39,7 @@ import {
     FFlowComponent,
     FFlowModule,
     FReassignConnectionEvent,
+    FSelectionChangeEvent,
     FZoomDirective,
     ICurrentSelection,
 } from '@foblex/flow';
@@ -45,6 +48,7 @@ import { Subject } from 'rxjs';
 import { CollaborationPresenceService } from '../../services/collaboration/collaboration-presence.service';
 import { ToastService } from '../../services/notifications/toast.service';
 import { AppSvgIconComponent } from '../../shared/components/app-svg-icon/app-svg-icon.component';
+import { CollabCursorLayerComponent } from '../components/collab-cursor-layer/collab-cursor-layer.component';
 import { DomainDialogComponent } from '../components/domain-dialog/domain-dialog.component';
 import { FlowActionPanelComponent } from '../components/flow-action-panel/flow-action-panel.component';
 import { FlowBaseNodeComponent } from '../components/flow-base-node/flow-base-node.component';
@@ -84,6 +88,7 @@ import { GraphNoteModel, NodeModel, ProjectNodeModel, StartNodeModel } from '../
 import { CreateNodeRequest } from '../core/models/node-creation.types';
 import { CustomPortId } from '../core/models/port.model';
 import { ClipboardService } from '../services/clipboard.service';
+import { CollabPresentationService } from '../services/collab-presentation.service';
 import { FlowService } from '../services/flow.service';
 import { FlowSettingsService } from '../services/flow-settings.service';
 import { NodeFactoryService } from '../services/node-factory.service';
@@ -130,6 +135,7 @@ function waypointsEqual(a: IPoint[], b: IPoint[]): boolean {
         FConnectionWaypoints,
         WaypointTooltipDirective,
         FlowFilesButtonComponent,
+        CollabCursorLayerComponent,
     ],
 })
 export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
@@ -236,13 +242,55 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     private readonly toastService = inject(ToastService);
     private readonly injector = inject(Injector);
     private readonly collaborationPresenceService = inject(CollaborationPresenceService);
+    readonly collabPresentation = inject(CollabPresentationService);
 
     /** Ids of nodes currently being dragged by the local user — used to ignore echo moves. */
     private readonly locallyDraggingNodeIds = new Set<string>();
     /** Timestamp of the last throttled node_moved op sent per node id, for ~50 ms trailing throttle. */
     private readonly lastMoveSentAt = new Map<string, number>();
+    /** Timestamp of last cursor op sent, for ~40 ms trailing throttle. */
+    private lastCursorSentAt = 0;
 
-    constructor() {}
+    /**
+     * Derived computed: backendNodeId → {color, displayName} for remote selections.
+     * Consumed in the template to pass `remoteSelection` to each node.
+     */
+    protected readonly remoteNodeSelectionMap = computed(() => this.collabPresentation.nodeSelectionMap());
+
+    constructor() {
+        // Subscribe to remote cursor moves — filter self-echoes, guard flow_id.
+        this.collaborationPresenceService.remoteCursor$.pipe(takeUntilDestroyed()).subscribe((msg) => {
+            if (msg.origin === this.collaborationPresenceService.selfMemberId()) {
+                return;
+            }
+            if (msg.flow_id !== this.currentFlowId) {
+                return;
+            }
+            const participants = this.collaborationPresenceService.participants();
+            const displayName = this.collabPresentation.resolveDisplayName(msg.user_id, participants);
+            this.collabPresentation.upsertCursor(msg.origin, msg.x, msg.y, msg.user_id, displayName);
+        });
+
+        // Subscribe to remote selection changes — filter self-echoes, guard flow_id.
+        this.collaborationPresenceService.remoteSelection$.pipe(takeUntilDestroyed()).subscribe((msg) => {
+            if (msg.origin === this.collaborationPresenceService.selfMemberId()) {
+                return;
+            }
+            if (msg.flow_id !== this.currentFlowId) {
+                return;
+            }
+            const participants = this.collaborationPresenceService.participants();
+            const displayName = this.collabPresentation.resolveDisplayName(msg.user_id, participants);
+            this.collabPresentation.setSelection(msg.origin, new Set(msg.node_ids), msg.user_id, displayName);
+        });
+
+        // Prune stale cursors/selections when participants list changes.
+        effect(() => {
+            const participants = this.collaborationPresenceService.participants();
+            const liveIds = new Set(participants.map((p) => p.user_id));
+            this.collabPresentation.pruneToUsers(liveIds);
+        });
+    }
 
     public ngOnInit(): void {
         this.applyIncomingFlowState(this.flowState);
@@ -266,6 +314,7 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
         }
         this.destroy$.next();
         this.destroy$.complete();
+        this.collabPresentation.clear();
     }
 
     public onInitialized(): void {
@@ -979,6 +1028,31 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
 
     public updateMouseTrackerPosition(event: IPoint): void {
         this.mouseCursorPosition = event;
+
+        // Send throttled cursor position (~40 ms trailing throttle).
+        const now = Date.now();
+        if (now - this.lastCursorSentAt >= 40) {
+            this.lastCursorSentAt = now;
+            const flowPos = this.toFlowPosition(event);
+            this.collaborationPresenceService.sendCursor({ x: flowPos.x, y: flowPos.y });
+        }
+    }
+
+    /**
+     * Handles foblex's `fSelectionChange` event on `<f-flow fDraggable>`.
+     * Maps selected foblex node ids → backend ids and emits via collaboration.
+     * Unsaved nodes (no backendId) are skipped.
+     */
+    public onSelectionChange(event: FSelectionChangeEvent): void {
+        const nodes = this.flowService.nodes();
+        const backendIds: number[] = [];
+        for (const fNodeId of event.nodeIds) {
+            const node = nodes.find((n) => n.id === fNodeId);
+            if (node && typeof node.backendId === 'number') {
+                backendIds.push(node.backendId);
+            }
+        }
+        this.collaborationPresenceService.sendSelection({ node_ids: backendIds });
     }
 
     public onAutoArrange(): void {
