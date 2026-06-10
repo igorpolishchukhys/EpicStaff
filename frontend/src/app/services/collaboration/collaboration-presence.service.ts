@@ -1,23 +1,48 @@
 import { inject, Injectable, signal } from '@angular/core';
+import { Observable, Subject } from 'rxjs';
 
 import { AuthService } from '../auth/auth.service';
 import { ConfigService } from '../config/config.service';
-import { CollabConnectionState, PresenceMessage } from './collab-message.model';
+import {
+    CollabConnectionState,
+    DocumentStateMessage,
+    isDocumentStateMessage,
+    isNodeMovedMessage,
+    isPresenceMessage,
+    NodeMovedMessage,
+    NodeMoveOp,
+} from './collab-message.model';
 
 const RECONNECT_DELAY_MS = 3_000;
 
 @Injectable({ providedIn: 'root' })
 export class CollaborationPresenceService {
+    // --- Signals ---
     readonly participantCount = signal<number>(0);
     readonly connectionState = signal<CollabConnectionState>('disconnected');
 
+    // --- Observables ---
+    readonly remoteNodeMove$: Observable<NodeMovedMessage>;
+    readonly documentState$: Observable<DocumentStateMessage>;
+
+    // --- Private fields ---
     private readonly authService = inject(AuthService);
     private readonly configService = inject(ConfigService);
+
+    private readonly remoteNodeMoveSubject = new Subject<NodeMovedMessage>();
+    private readonly documentStateSubject = new Subject<DocumentStateMessage>();
 
     private socket: WebSocket | null = null;
     private connectedFlowId: number | null = null;
     private intentionalClose = false;
     private reconnectTimerId: ReturnType<typeof setTimeout> | null = null;
+
+    constructor() {
+        this.remoteNodeMove$ = this.remoteNodeMoveSubject.asObservable();
+        this.documentState$ = this.documentStateSubject.asObservable();
+    }
+
+    // --- Public methods ---
 
     connect(flowId: number): void {
         if (this.socket !== null) {
@@ -27,7 +52,7 @@ export class CollaborationPresenceService {
             this.disconnect();
         }
 
-        this.openSocket(flowId);
+        this.openSocket(flowId, true);
     }
 
     disconnect(): void {
@@ -39,7 +64,33 @@ export class CollaborationPresenceService {
         this.connectedFlowId = null;
     }
 
-    private openSocket(flowId: number): void {
+    sendNodeMove(operation: NodeMoveOp): void {
+        if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
+            return;
+        }
+
+        const message = JSON.stringify({
+            type: 'node_moved',
+            flow_id: this.connectedFlowId,
+            node_id: operation.node_id,
+            x: operation.x,
+            y: operation.y,
+        });
+
+        this.socket.send(message);
+    }
+
+    // --- Private methods ---
+
+    /**
+     * Opens a new WebSocket connection for the given flow.
+     *
+     * @param flowId - The flow to connect to.
+     * @param allowReconnect - When true, a connection failure schedules one
+     *   reconnect attempt. When false (reconnect attempt itself), failure is
+     *   treated as final and no further reconnect is scheduled.
+     */
+    private openSocket(flowId: number, allowReconnect: boolean): void {
         const url = this.buildWebSocketUrl(flowId);
         if (url === null) {
             return;
@@ -73,7 +124,13 @@ export class CollaborationPresenceService {
             }
 
             this.connectionState.set('disconnected');
-            this.scheduleReconnect(flowId);
+
+            if (allowReconnect) {
+                this.scheduleReconnect(flowId);
+            } else {
+                // Reconnect attempt itself failed — give up.
+                this.connectedFlowId = null;
+            }
         };
 
         webSocket.onerror = (): void => {
@@ -90,11 +147,20 @@ export class CollaborationPresenceService {
             return;
         }
 
-        if (!isPresenceMessage(parsed)) {
+        if (isPresenceMessage(parsed)) {
+            this.participantCount.set(parsed.count);
             return;
         }
 
-        this.participantCount.set(parsed.count);
+        if (isNodeMovedMessage(parsed)) {
+            this.remoteNodeMoveSubject.next(parsed);
+            return;
+        }
+
+        if (isDocumentStateMessage(parsed)) {
+            this.documentStateSubject.next(parsed);
+            return;
+        }
     }
 
     private scheduleReconnect(flowId: number): void {
@@ -104,48 +170,8 @@ export class CollaborationPresenceService {
             if (this.intentionalClose) {
                 return;
             }
-            this.attemptReconnect(flowId);
+            this.openSocket(flowId, false);
         }, RECONNECT_DELAY_MS);
-    }
-
-    private attemptReconnect(flowId: number): void {
-        const url = this.buildWebSocketUrl(flowId);
-        if (url === null) {
-            return;
-        }
-
-        this.connectedFlowId = flowId;
-        this.connectionState.set('connecting');
-
-        const webSocket = new WebSocket(url);
-        this.socket = webSocket;
-
-        webSocket.onopen = (): void => {
-            if (this.socket === webSocket) {
-                this.connectionState.set('connected');
-            }
-        };
-
-        webSocket.onmessage = (event: MessageEvent): void => {
-            this.handleMessage(event);
-        };
-
-        webSocket.onclose = (): void => {
-            if (this.socket !== webSocket) {
-                return;
-            }
-            this.socket = null;
-
-            if (!this.intentionalClose) {
-                // Reconnect attempt also failed — stay disconnected per spec.
-                this.connectionState.set('disconnected');
-                this.connectedFlowId = null;
-            }
-        };
-
-        webSocket.onerror = (): void => {
-            // Handled by onclose.
-        };
     }
 
     private closeSocket(): void {
@@ -178,14 +204,4 @@ export class CollaborationPresenceService {
 
         return `${normalizedBase}collab/?flow_id=${flowId}&token=${encodeURIComponent(token)}`;
     }
-}
-
-function isPresenceMessage(value: unknown): value is PresenceMessage {
-    return (
-        typeof value === 'object' &&
-        value !== null &&
-        (value as Record<string, unknown>)['type'] === 'presence' &&
-        typeof (value as Record<string, unknown>)['flow_id'] === 'number' &&
-        typeof (value as Record<string, unknown>)['count'] === 'number'
-    );
 }

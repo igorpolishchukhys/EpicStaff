@@ -54,6 +54,7 @@ import { FlowsStorageService } from '../../../../features/flows/services/flows-s
 import { RunGraphService } from '../../../../features/flows/services/run-graph-session.service';
 import { FlowMessagesPanelComponent } from '../../../../pages/running-graph/components/flow-messages-panel/flow-messages-panel.component';
 import { RunSessionSSEService } from '../../../../pages/running-graph/services/graph-session-sse.service';
+import { DocumentStateMessage } from '../../../../services/collaboration/collab-message.model';
 import { CollaborationPresenceService } from '../../../../services/collaboration/collaboration-presence.service';
 import { ConfigService } from '../../../../services/config/config.service';
 import { ToastService } from '../../../../services/notifications/toast.service';
@@ -130,6 +131,8 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
     public isSaving = signal(false);
     public isRunning = signal(false);
     public restoreWarnings = signal<RestoreWarning[]>([]);
+    /** Buffers the latest document_state message received before the flow finishes loading. */
+    private readonly pendingDocumentState = signal<DocumentStateMessage | null>(null);
 
     public isPanelOpen = signal(false);
     public isPanelCollapsed = signal(true);
@@ -198,6 +201,44 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
         this.sidePanelService.saveNodeRequest$
             .pipe(takeUntilDestroyed(this.destroyRef))
             .subscribe((node) => this.handleNodeSaveRequest(node));
+
+        // Collaboration: apply remote node moves, guarded by flow_id.
+        this.collaborationPresenceService.remoteNodeMove$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((msg) => {
+            const currentId = this.graphState()?.id;
+            if (msg.flow_id !== currentId) {
+                return;
+            }
+            this.flowGraphComponent?.applyRemoteNodeMove(msg.node_id, { x: msg.x, y: msg.y });
+        });
+
+        // Collaboration: buffer document_state until the flow canvas is loaded, then apply.
+        this.collaborationPresenceService.documentState$.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((msg) => {
+            const currentId = this.graphState()?.id;
+            if (msg.flow_id !== currentId) {
+                return;
+            }
+            if (!this.isLoaded()) {
+                // Buffer the latest document state — will be applied when load completes.
+                this.pendingDocumentState.set(msg);
+            } else {
+                this.flowGraphComponent?.applyDocumentState(msg.positions);
+            }
+        });
+
+        // Flush buffered document_state once the flow finishes loading.
+        effect(() => {
+            if (!this.isLoaded()) {
+                return;
+            }
+            const pending = this.pendingDocumentState();
+            if (pending !== null) {
+                this.pendingDocumentState.set(null);
+                // Defer one tick so the ViewChild (FlowGraphComponent) has rendered.
+                setTimeout(() => {
+                    this.flowGraphComponent?.applyDocumentState(pending.positions);
+                }, 0);
+            }
+        });
     }
 
     public ngOnInit(): void {

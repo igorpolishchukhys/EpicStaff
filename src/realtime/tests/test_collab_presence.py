@@ -22,6 +22,7 @@ import pytest
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.testclient import TestClient
 
+from application.collab_socket_registry import CollabSocketRegistry
 from application.presence_service import PresenceService
 from infrastructure.persistence.presence_repository import PresenceRepository
 
@@ -104,7 +105,9 @@ class TestAuthRejection:
     """Missing or invalid tokens must cause an abnormal close (1008)."""
 
     def test_missing_token_closes_1008(self):
-        service = PresenceService(repository=_make_fake_repo())
+        service = PresenceService(
+            repository=_make_fake_repo(), registry=CollabSocketRegistry()
+        )
         app = _build_app(service, _valid_introspect)
 
         with TestClient(app) as client:
@@ -114,7 +117,9 @@ class TestAuthRejection:
                     ws.receive_text()
 
     def test_invalid_token_closes_1008(self):
-        service = PresenceService(repository=_make_fake_repo())
+        service = PresenceService(
+            repository=_make_fake_repo(), registry=CollabSocketRegistry()
+        )
         app = _build_app(service, _invalid_introspect)
 
         with TestClient(app) as client:
@@ -125,7 +130,9 @@ class TestAuthRejection:
                     ws.receive_text()
 
     def test_missing_flow_id_closes_1008(self):
-        service = PresenceService(repository=_make_fake_repo())
+        service = PresenceService(
+            repository=_make_fake_repo(), registry=CollabSocketRegistry()
+        )
         app = _build_app(service, _valid_introspect)
 
         with TestClient(app) as client:
@@ -144,7 +151,7 @@ class TestTwoClientsOnSameFlow:
 
     def test_second_join_broadcasts_count_two_to_both(self):
         repo = _make_fake_repo()
-        service = PresenceService(repository=repo)
+        service = PresenceService(repository=repo, registry=CollabSocketRegistry())
         app = _build_app(service, _valid_introspect)
 
         with TestClient(app) as client:
@@ -184,7 +191,7 @@ class TestDisconnectDecrementsCount:
 
     def test_leave_broadcasts_count_one_to_remaining(self):
         repo = _make_fake_repo()
-        service = PresenceService(repository=repo)
+        service = PresenceService(repository=repo, registry=CollabSocketRegistry())
         app = _build_app(service, _valid_introspect)
 
         with TestClient(app) as client:
@@ -222,7 +229,7 @@ class TestFlowIsolation:
 
     def test_different_flows_see_independent_counts(self):
         repo = _make_fake_repo()
-        service = PresenceService(repository=repo)
+        service = PresenceService(repository=repo, registry=CollabSocketRegistry())
         app = _build_app(service, _valid_introspect)
 
         with TestClient(app) as client:
@@ -276,7 +283,8 @@ class TestJoinRedisFailure:
         self, monkeypatch: pytest.MonkeyPatch
     ):
         repo = _make_fake_repo()
-        service = PresenceService(repository=repo)
+        registry = CollabSocketRegistry()
+        service = PresenceService(repository=repo, registry=registry)
         app = _build_app(service, _valid_introspect)
 
         # Patch add_member to raise only on the first call, simulating a Redis
@@ -295,7 +303,7 @@ class TestJoinRedisFailure:
 
         with TestClient(app) as client:
             # First connection: join fails at Redis — route must close without
-            # NameError and the socket must NOT be in _sockets.
+            # NameError and the socket must NOT be in the registry.
             with pytest.raises(Exception):
                 with client.websocket_connect(
                     "/realtime/collab/?flow_id=42&token=t"
@@ -303,10 +311,7 @@ class TestJoinRedisFailure:
                     ws_bad.receive_text()
 
             # No local socket must remain after the failed join.
-            assert (
-                service._sockets.get(42) is None
-                or len(service._sockets.get(42, set())) == 0
-            )
+            assert len(registry.sockets_for(42)) == 0
 
             # Second connection succeeds normally.
             with client.websocket_connect(

@@ -40,7 +40,12 @@ from utils.auth import introspect_token
 from infrastructure.persistence.database import get_db, engine
 from infrastructure.persistence.db_models import Base
 from infrastructure.persistence.presence_repository import PresenceRepository
+from infrastructure.persistence.live_document_repository import LiveDocumentRepository
+from application.collab_socket_registry import CollabSocketRegistry
 from application.presence_service import PresenceService
+from application.live_document_service import LiveDocumentService
+from domain.models.collab_messages import NodeMovedIn
+from pydantic import ValidationError
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -78,7 +83,14 @@ app.add_middleware(
 connection_repository = ConnectionRepository()
 
 presence_repository = PresenceRepository(redis_service=redis_service)
-presence_service = PresenceService(repository=presence_repository)
+live_document_repository = LiveDocumentRepository(redis_service=redis_service)
+collab_registry = CollabSocketRegistry()
+presence_service = PresenceService(
+    repository=presence_repository, registry=collab_registry
+)
+live_document_service = LiveDocumentService(
+    registry=collab_registry, repository=live_document_repository
+)
 
 _voice_settings_cache: dict | None = None
 _voice_settings_cache_time: float = 0.0
@@ -257,19 +269,27 @@ async def collab_presence(
     flow_id: int | None = None,
     token: str | None = None,
 ):
-    """Collaborative presence counter for the flow editor.
+    """Collaborative presence + live-document WebSocket for the flow editor.
 
     Query params:
         flow_id (int, required)  — identifies the flow being edited.
         token   (str, required)  — JWT; validated via introspect_token.
 
-    On connect the client is added to the flow's presence set.  Every
-    mutation (join or leave) broadcasts::
+    On connect:
+      1. The client is added to the flow's presence set; all sockets on
+         the flow receive ``{"type": "presence", "flow_id": <int>, "count": <int>}``.
+      2. The joining socket immediately receives a
+         ``{"type": "document_state", "flow_id": <int>, "positions": {...}}``
+         snapshot (empty when no moves have been recorded yet).
 
-        {"type": "presence", "flow_id": <int>, "count": <int>}
+    Inbound frames:
+      ``{"type": "node_moved", "flow_id": <int>, "node_id": <int>, "x": <number>, "y": <number>}``
+      Validated with ``NodeMovedIn``; malformed / unknown-type frames are
+      silently ignored (logged at warning) and the connection is NOT closed.
 
-    to all connections on that flow.  The client sends nothing; the
-    receive loop exists solely to detect a disconnect.
+    Outbound rebroadcast (including sender):
+      ``{"type": "node_moved", "flow_id": <int>, "node_id": <int>,
+         "x": <number>, "y": <number>, "origin": "<member_id>"}``
     """
     if not token:
         logger.warning("collab_presence: missing token, closing 1008")
@@ -292,9 +312,38 @@ async def collab_presence(
     try:
         member_id = await presence_service.join(flow_id, websocket)
         logger.info("collab_presence: accepted flow={} member={}", flow_id, member_id)
+
+        # Send the current document state to the joining socket only.
+        doc_state = await live_document_service.get_document_state(flow_id)
+        await websocket.send_json(doc_state)
+
         while True:
-            # Block until the client disconnects (we don't process messages).
-            await websocket.receive_text()
+            raw = await websocket.receive_text()
+            try:
+                data = json.loads(raw)
+                if data.get("type") == "node_moved":
+                    frame = NodeMovedIn(**data)
+                    await live_document_service.apply_node_move(
+                        flow_id=frame.flow_id,
+                        node_id=frame.node_id,
+                        x=frame.x,
+                        y=frame.y,
+                        origin_member_id=member_id,
+                    )
+                else:
+                    logger.warning(
+                        "collab_presence: unknown frame type={} flow={} member={}",
+                        data.get("type"),
+                        flow_id,
+                        member_id,
+                    )
+            except (json.JSONDecodeError, ValidationError) as exc:
+                logger.warning(
+                    "collab_presence: malformed frame ignored flow={} member={} err={}",
+                    flow_id,
+                    member_id,
+                    exc,
+                )
     except WebSocketDisconnect:
         logger.info(
             "collab_presence: disconnected flow={} member={}", flow_id, member_id

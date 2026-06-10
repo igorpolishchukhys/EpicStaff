@@ -1,0 +1,64 @@
+import json
+
+from fastapi import WebSocket
+from loguru import logger
+
+
+class CollabSocketRegistry:
+    """In-process registry of live WebSocket connections per flow.
+
+    Provides registration, unregistration, and fan-out broadcast for all
+    collab sockets (presence *and* live-document).  A single instance is
+    shared across ``PresenceService`` and ``LiveDocumentService`` so that
+    both use the same source of truth.
+    """
+
+    def __init__(self) -> None:
+        self._sockets: dict[int, set[WebSocket]] = {}
+
+    def register(self, flow_id: int, websocket: WebSocket) -> None:
+        """Add ``websocket`` to the registry for ``flow_id``."""
+        if flow_id not in self._sockets:
+            self._sockets[flow_id] = set()
+        self._sockets[flow_id].add(websocket)
+
+    def unregister(self, flow_id: int, websocket: WebSocket) -> None:
+        """Remove ``websocket`` from the registry for ``flow_id``.
+
+        Safe to call even when the socket is not present.
+        """
+        flow_sockets = self._sockets.get(flow_id)
+        if flow_sockets is not None:
+            flow_sockets.discard(websocket)
+            if not flow_sockets:
+                del self._sockets[flow_id]
+
+    def sockets_for(self, flow_id: int) -> set[WebSocket]:
+        """Return the current set of sockets for ``flow_id`` (may be empty)."""
+        return set(self._sockets.get(flow_id, set()))
+
+    async def broadcast_json(self, flow_id: int, payload: dict) -> None:
+        """Serialise ``payload`` to JSON and send to every socket on ``flow_id``.
+
+        Dead sockets are silently dropped from the registry.
+        """
+        message = json.dumps(payload)
+        flow_sockets = list(self._sockets.get(flow_id, set()))
+        dead: list[WebSocket] = []
+
+        for ws in flow_sockets:
+            try:
+                await ws.send_text(message)
+            except Exception:
+                logger.warning(
+                    "collab registry: dead socket on flow={}, removing", flow_id
+                )
+                dead.append(ws)
+
+        if dead:
+            surviving = self._sockets.get(flow_id)
+            if surviving is not None:
+                for ws in dead:
+                    surviving.discard(ws)
+                if not surviving:
+                    del self._sockets[flow_id]
