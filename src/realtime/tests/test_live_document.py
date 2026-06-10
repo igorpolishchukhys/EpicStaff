@@ -149,11 +149,15 @@ class TestDocumentStateEmpty:
 
                 # Second message: document_state.
                 doc_state = json.loads(ws.receive_text())
-                assert doc_state == {
-                    "type": "document_state",
-                    "flow_id": 1,
-                    "positions": {},
-                }
+                # Phase 1 (EST-6): document_state now includes schema_version,
+                # nodes, connections, and tombstones in addition to positions.
+                assert doc_state["type"] == "document_state"
+                assert doc_state["flow_id"] == 1
+                assert doc_state["schema_version"] == 2
+                assert doc_state["positions"] == {}
+                assert doc_state["nodes"] == {}
+                assert doc_state["connections"] == {}
+                assert doc_state["tombstones"] == {}
 
 
 # ---------------------------------------------------------------------------

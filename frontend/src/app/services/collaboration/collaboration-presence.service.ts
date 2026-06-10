@@ -5,16 +5,24 @@ import { AuthService } from '../auth/auth.service';
 import { ConfigService } from '../config/config.service';
 import {
     CollabConnectionState,
+    ConnectionAddedMessage,
+    ConnectionAddOp,
+    ConnectionRemovedMessage,
+    ConnectionRemoveOp,
     CursorMovedMessage,
     CursorMoveOp,
     DocumentStateMessage,
+    isConnectionAddedMessage,
+    isConnectionRemovedMessage,
     isCursorMovedMessage,
     isDocumentStateMessage,
     isHeartbeatAckMessage,
     isLockDeniedMessage,
     isLockGrantedMessage,
     isLockStateMessage,
+    isNodeAddedMessage,
     isNodeDataUpdatedMessage,
+    isNodeDeletedMessage,
     isNodeLockedMessage,
     isNodeMovedMessage,
     isNodeUnlockedMessage,
@@ -26,8 +34,12 @@ import {
     LockReleaseOp,
     LockRequestOp,
     LockStateMessage,
+    NodeAddedMessage,
+    NodeAddOp,
     NodeDataUpdatedMessage,
     NodeDataUpdateOp,
+    NodeDeletedMessage,
+    NodeDeleteOp,
     NodeLockedMessage,
     NodeMovedMessage,
     NodeMoveOp,
@@ -71,6 +83,10 @@ export class CollaborationPresenceService {
     readonly nodeUnlocked$: Observable<NodeUnlockedMessage>;
     readonly lockState$: Observable<LockStateMessage>;
     readonly remoteNodeDataUpdate$: Observable<NodeDataUpdatedMessage>;
+    readonly remoteNodeAdded$: Observable<NodeAddedMessage>;
+    readonly remoteNodeDeleted$: Observable<NodeDeletedMessage>;
+    readonly remoteConnectionAdded$: Observable<ConnectionAddedMessage>;
+    readonly remoteConnectionRemoved$: Observable<ConnectionRemovedMessage>;
 
     // --- Private fields ---
     private readonly authService = inject(AuthService);
@@ -86,6 +102,10 @@ export class CollaborationPresenceService {
     private readonly nodeUnlockedSubject = new Subject<NodeUnlockedMessage>();
     private readonly lockStateSubject = new Subject<LockStateMessage>();
     private readonly remoteNodeDataUpdateSubject = new Subject<NodeDataUpdatedMessage>();
+    private readonly remoteNodeAddedSubject = new Subject<NodeAddedMessage>();
+    private readonly remoteNodeDeletedSubject = new Subject<NodeDeletedMessage>();
+    private readonly remoteConnectionAddedSubject = new Subject<ConnectionAddedMessage>();
+    private readonly remoteConnectionRemovedSubject = new Subject<ConnectionRemovedMessage>();
 
     private socket: WebSocket | null = null;
     private connectedFlowId: number | null = null;
@@ -105,6 +125,10 @@ export class CollaborationPresenceService {
         this.nodeUnlocked$ = this.nodeUnlockedSubject.asObservable();
         this.lockState$ = this.lockStateSubject.asObservable();
         this.remoteNodeDataUpdate$ = this.remoteNodeDataUpdateSubject.asObservable();
+        this.remoteNodeAdded$ = this.remoteNodeAddedSubject.asObservable();
+        this.remoteNodeDeleted$ = this.remoteNodeDeletedSubject.asObservable();
+        this.remoteConnectionAdded$ = this.remoteConnectionAddedSubject.asObservable();
+        this.remoteConnectionRemoved$ = this.remoteConnectionRemovedSubject.asObservable();
     }
 
     // --- Public methods ---
@@ -216,6 +240,68 @@ export class CollaborationPresenceService {
             node_id: operation.node_id,
             node_name: operation.node_name,
             data: operation.data,
+        });
+
+        this.socket.send(message);
+    }
+
+    sendNodeAdd(operation: NodeAddOp): void {
+        if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
+            return;
+        }
+
+        const message = JSON.stringify({
+            type: 'node_added',
+            flow_id: this.connectedFlowId,
+            node_key: operation.node_key,
+            node: operation.node,
+        });
+
+        this.socket.send(message);
+    }
+
+    sendNodeDelete(operation: NodeDeleteOp): void {
+        if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
+            return;
+        }
+
+        const message = JSON.stringify({
+            type: 'node_deleted',
+            flow_id: this.connectedFlowId,
+            node_key: operation.node_key,
+        });
+
+        this.socket.send(message);
+    }
+
+    sendConnectionAdd(operation: ConnectionAddOp): void {
+        if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
+            return;
+        }
+
+        const message = JSON.stringify({
+            type: 'connection_added',
+            flow_id: this.connectedFlowId,
+            connection_id: operation.connection_id,
+            source_node_key: operation.source_node_key,
+            target_node_key: operation.target_node_key,
+            source_port_id: operation.source_port_id,
+            target_port_id: operation.target_port_id,
+            connection: operation.connection,
+        });
+
+        this.socket.send(message);
+    }
+
+    sendConnectionRemove(operation: ConnectionRemoveOp): void {
+        if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
+            return;
+        }
+
+        const message = JSON.stringify({
+            type: 'connection_removed',
+            flow_id: this.connectedFlowId,
+            connection_id: operation.connection_id,
         });
 
         this.socket.send(message);
@@ -355,6 +441,26 @@ export class CollaborationPresenceService {
 
         if (isNodeDataUpdatedMessage(parsed)) {
             this.remoteNodeDataUpdateSubject.next(parsed);
+            return;
+        }
+
+        if (isNodeAddedMessage(parsed)) {
+            this.remoteNodeAddedSubject.next(parsed);
+            return;
+        }
+
+        if (isNodeDeletedMessage(parsed)) {
+            this.remoteNodeDeletedSubject.next(parsed);
+            return;
+        }
+
+        if (isConnectionAddedMessage(parsed)) {
+            this.remoteConnectionAddedSubject.next(parsed);
+            return;
+        }
+
+        if (isConnectionRemovedMessage(parsed)) {
+            this.remoteConnectionRemovedSubject.next(parsed);
             return;
         }
     }

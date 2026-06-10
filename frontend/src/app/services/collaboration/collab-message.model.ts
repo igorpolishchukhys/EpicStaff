@@ -23,6 +23,85 @@ export interface DocumentStateMessage {
     type: 'document_state';
     flow_id: number;
     positions: Record<string, { x: number; y: number }>;
+    /** Present when schema_version >= 2. Absent on older servers — tolerated. */
+    schema_version?: number;
+    /** Keyed by node_key. Present when schema_version >= 2. */
+    nodes?: Record<string, unknown>;
+    /** Keyed by connection_id. Present when schema_version >= 2. */
+    connections?: Record<
+        string,
+        {
+            source_node_key: string;
+            target_node_key: string;
+            source_port_id: string;
+            target_port_id: string;
+            connection: unknown;
+        }
+    >;
+    /** Tombstones for deleted nodes/connections. Keys: "node:<node_key>" or "conn:<connection_id>". */
+    tombstones?: Record<string, string>;
+}
+
+export interface NodeAddedMessage {
+    type: 'node_added';
+    flow_id: number;
+    node_key: string;
+    node: unknown;
+    origin: string;
+}
+
+export interface NodeDeletedMessage {
+    type: 'node_deleted';
+    flow_id: number;
+    node_key: string;
+    /** Server-computed cascade — apply verbatim, do NOT recompute locally. */
+    removed_connection_ids: string[];
+    origin: string;
+}
+
+export interface ConnectionAddedMessage {
+    type: 'connection_added';
+    flow_id: number;
+    connection_id: string;
+    source_node_key: string;
+    target_node_key: string;
+    source_port_id: string;
+    target_port_id: string;
+    connection: unknown;
+    origin: string;
+}
+
+export interface ConnectionRemovedMessage {
+    type: 'connection_removed';
+    flow_id: number;
+    connection_id: string;
+    origin: string;
+}
+
+/** Outbound payload sent when a node is added locally. */
+export interface NodeAddOp {
+    node_key: string;
+    node: unknown;
+}
+
+/** Outbound payload sent when a node is deleted locally. */
+export interface NodeDeleteOp {
+    node_key: string;
+}
+
+/** Outbound payload sent when a connection is added locally. */
+export interface ConnectionAddOp {
+    connection_id: string;
+    source_node_key: string;
+    target_node_key: string;
+    source_port_id: string;
+    target_port_id: string;
+    connection: unknown;
+}
+
+/** Outbound payload sent when a connection is removed locally. */
+export interface ConnectionRemoveOp {
+    connection_id: string;
 }
 
 /** Outbound payload sent by the local client when the user moves a node. */
@@ -299,6 +378,61 @@ export function isNodeDataUpdatedMessage(value: unknown): value is NodeDataUpdat
         typeof record['node_name'] === 'string' &&
         typeof record['data'] === 'object' &&
         record['data'] !== null &&
+        typeof record['origin'] === 'string'
+    );
+}
+
+export function isNodeAddedMessage(value: unknown): value is NodeAddedMessage {
+    const record = value as Record<string, unknown>;
+    return (
+        typeof value === 'object' &&
+        value !== null &&
+        record['type'] === 'node_added' &&
+        typeof record['flow_id'] === 'number' &&
+        typeof record['node_key'] === 'string' &&
+        typeof record['node'] === 'object' &&
+        record['node'] !== null &&
+        typeof record['origin'] === 'string'
+    );
+}
+
+export function isNodeDeletedMessage(value: unknown): value is NodeDeletedMessage {
+    const record = value as Record<string, unknown>;
+    return (
+        typeof value === 'object' &&
+        value !== null &&
+        record['type'] === 'node_deleted' &&
+        typeof record['flow_id'] === 'number' &&
+        typeof record['node_key'] === 'string' &&
+        Array.isArray(record['removed_connection_ids']) &&
+        typeof record['origin'] === 'string'
+    );
+}
+
+export function isConnectionAddedMessage(value: unknown): value is ConnectionAddedMessage {
+    const record = value as Record<string, unknown>;
+    return (
+        typeof value === 'object' &&
+        value !== null &&
+        record['type'] === 'connection_added' &&
+        typeof record['flow_id'] === 'number' &&
+        typeof record['connection_id'] === 'string' &&
+        typeof record['source_node_key'] === 'string' &&
+        typeof record['target_node_key'] === 'string' &&
+        typeof record['source_port_id'] === 'string' &&
+        typeof record['target_port_id'] === 'string' &&
+        typeof record['origin'] === 'string'
+    );
+}
+
+export function isConnectionRemovedMessage(value: unknown): value is ConnectionRemovedMessage {
+    const record = value as Record<string, unknown>;
+    return (
+        typeof value === 'object' &&
+        value !== null &&
+        record['type'] === 'connection_removed' &&
+        typeof record['flow_id'] === 'number' &&
+        typeof record['connection_id'] === 'string' &&
         typeof record['origin'] === 'string'
     );
 }
