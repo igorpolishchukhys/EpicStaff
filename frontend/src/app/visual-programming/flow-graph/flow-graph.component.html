@@ -21,6 +21,7 @@
         (fCreateConnection)="onConnectionAdded($event)"
         (fReassignConnection)="onReassignConnection($event)"
         (fCreateNode)="onNodeDroppedFromPanel($event)"
+        (fSelectionChange)="onSelectionChange($event)"
     >
         <f-background>
             <f-circle-pattern></f-circle-pattern>
@@ -104,6 +105,9 @@
                     [node]="node"
                     [showVariables]="flowSettings.showInputsOutputs()"
                     [fMinimapClass]="getMinimapClassForNode(node)"
+                    [remoteSelection]="
+                        node.backendId != null ? (remoteNodeSelectionMap().get(node.backendId) ?? null) : null
+                    "
                     fNode
                     fDragHandle
                     [fNodeId]="node.id"
@@ -263,6 +267,8 @@
                     ></f-connection-waypoints>
                 </f-connection>
             }
+            <!-- Remote collaborator cursors — inside <f-canvas> so foblex zoom/pan applies -->
+            <app-collab-cursor-layer [cursors]="collabPresentation.remoteCursors()"></app-collab-cursor-layer>
         </f-canvas>
 
         <f-selection-area></f-selection-area>

@@ -1,0 +1,47 @@
+/*
+ * Collab cursor layer — contained inside <f-canvas>.
+ * All cursor elements are pointer-events: none so they never interfere with
+ * canvas interactions.
+ */
+
+:host {
+    position: absolute;
+    inset: 0;
+    overflow: visible;
+    pointer-events: none;
+    /* Sit above nodes (z-index 1000) but below dialogs */
+    z-index: var(--collab-cursor-z, 2000);
+}
+
+.collab-cursor {
+    position: absolute;
+    top: 0;
+    left: 0;
+    pointer-events: none;
+    /* translate() applied via [style.transform] keeps origin at (0,0) */
+    display: flex;
+    align-items: flex-start;
+    gap: 2px;
+}
+
+.collab-cursor__pointer {
+    flex-shrink: 0;
+    /* Slight drop shadow to make arrow visible on light and dark backgrounds */
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
+}
+
+.collab-cursor__label {
+    display: inline-block;
+    margin-top: 14px; /* aligns pill with the tip of the arrow */
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    color: #fff;
+    white-space: nowrap;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    /* Subtle shadow so text is legible against any canvas background */
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}

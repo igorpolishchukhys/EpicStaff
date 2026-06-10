@@ -329,8 +329,8 @@ class TestMalformedFrameIgnored:
                 ws.receive_text()  # presence
                 ws.receive_text()  # document_state
 
-                # Unknown type must be silently ignored.
-                ws.send_text(json.dumps({"type": "cursor_moved", "x": 1, "y": 2}))
+                # Completely unknown type must be silently ignored.
+                ws.send_text(json.dumps({"type": "bogus_type", "x": 1, "y": 2}))
 
                 # Socket still alive — send a valid move.
                 ws.send_text(

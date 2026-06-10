@@ -44,7 +44,8 @@ from infrastructure.persistence.live_document_repository import LiveDocumentRepo
 from application.collab_socket_registry import CollabSocketRegistry
 from application.presence_service import PresenceService
 from application.live_document_service import LiveDocumentService
-from domain.models.collab_messages import NodeMovedIn
+from application.cursor_service import CursorService
+from domain.models.collab_messages import NodeMovedIn, CursorMovedIn, SelectionChangedIn
 from pydantic import ValidationError
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -91,6 +92,7 @@ presence_service = PresenceService(
 live_document_service = LiveDocumentService(
     registry=collab_registry, repository=live_document_repository
 )
+cursor_service = CursorService(registry=collab_registry)
 
 _voice_settings_cache: dict | None = None
 _voice_settings_cache_time: float = 0.0
@@ -302,6 +304,14 @@ async def collab_presence(
         await websocket.close(code=1008)
         return
 
+    user_id = user_info.get("user_id")
+    if not isinstance(user_id, int):
+        logger.warning(
+            "collab_presence: token active but missing user_id, closing 1008"
+        )
+        await websocket.close(code=1008)
+        return
+
     if flow_id is None:
         logger.warning("collab_presence: missing flow_id, closing 1008")
         await websocket.close(code=1008)
@@ -313,7 +323,7 @@ async def collab_presence(
         member_id = await presence_service.join(
             flow_id,
             websocket,
-            user_id=user_info.get("user_id"),
+            user_id=user_id,
             display_name=user_info.get("display_name"),
         )
         logger.info("collab_presence: accepted flow={} member={}", flow_id, member_id)
@@ -322,11 +332,22 @@ async def collab_presence(
         doc_state = await live_document_service.get_document_state(flow_id)
         await websocket.send_json(doc_state)
 
+        # Send the self frame so the client knows its own member_id and user_id.
+        await websocket.send_json(
+            {
+                "type": "self",
+                "flow_id": flow_id,
+                "member_id": member_id,
+                "user_id": user_id,
+            }
+        )
+
         while True:
             raw = await websocket.receive_text()
             try:
                 data = json.loads(raw)
-                if data.get("type") == "node_moved":
+                msg_type = data.get("type")
+                if msg_type == "node_moved":
                     frame = NodeMovedIn(**data)
                     await live_document_service.apply_node_move(
                         flow_id=frame.flow_id,
@@ -334,6 +355,23 @@ async def collab_presence(
                         x=frame.x,
                         y=frame.y,
                         origin_member_id=member_id,
+                    )
+                elif msg_type == "cursor_moved":
+                    frame = CursorMovedIn(**data)
+                    await cursor_service.relay_cursor(
+                        flow_id=frame.flow_id,
+                        x=frame.x,
+                        y=frame.y,
+                        origin_member_id=member_id,
+                        user_id=user_id,
+                    )
+                elif msg_type == "selection_changed":
+                    frame = SelectionChangedIn(**data)
+                    await cursor_service.relay_selection(
+                        flow_id=frame.flow_id,
+                        node_ids=frame.node_ids,
+                        origin_member_id=member_id,
+                        user_id=user_id,
                     )
                 else:
                     logger.warning(

@@ -6,6 +6,7 @@ import {
     computed,
     EventEmitter,
     Input,
+    input,
     Output,
     signal,
 } from '@angular/core';
@@ -61,6 +62,7 @@ import { FlowNodeVariablesOverlayComponent } from './flow-node-variables-overlay
     changeDetection: ChangeDetectionStrategy.OnPush,
     host: {
         '[class]': 'getNodeClass()',
+        '[style.--remote-selection-color]': 'remoteSelection()?.color ?? null',
     },
 })
 export class FlowBaseNodeComponent {
@@ -74,6 +76,13 @@ export class FlowBaseNodeComponent {
     public isExpanded = signal(false);
     public isToggleDisabled = signal(false);
     @Input() showVariables: boolean = false;
+
+    /**
+     * When a remote collaborator has selected this node, pass `{color, displayName}`
+     * here. A coloured outline and a small name badge will be shown. Pass `null`
+     * (the default) to show no remote-selection indicator.
+     */
+    readonly remoteSelection = input<{ color: string; displayName: string } | null>(null);
 
     @Output() projectExpandToggled = new EventEmitter<ProjectNodeModel>();
     @Output() portMouseenter = new EventEmitter<void>();
