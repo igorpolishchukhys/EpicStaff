@@ -1,5 +1,6 @@
 import { inject, Injectable, Signal, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { Observable, Subject } from 'rxjs';
 
 import { CollaborationPresenceService } from '../../services/collaboration/collaboration-presence.service';
 
@@ -21,13 +22,29 @@ export interface LockEntry {
  */
 @Injectable({ providedIn: 'root' })
 export class PanelLockService {
+    // Private fields. Declared before the public read-only views because class
+    // field initializers run in declaration order and the views derive from them.
     private readonly _locks = signal<Map<number, LockEntry>>(new Map());
     private readonly _heldNodeId = signal<number | null>(null);
+    // INVARIANT: BOTH emit sites (the node_unlocked broadcast handler and the lock_state snapshot handler) must clear `_heldNodeId` before `.next()` — that ordering is what makes loss detection sound.
+    private readonly lockLostSubject = new Subject<number>();
+    private readonly collaborationPresenceService = inject(CollaborationPresenceService);
 
     readonly locks: Signal<Map<number, LockEntry>> = this._locks.asReadonly();
     readonly heldNodeId: Signal<number | null> = this._heldNodeId.asReadonly();
-
-    private readonly collaborationPresenceService = inject(CollaborationPresenceService);
+    /**
+     * Emits the backend node id when the lock held by THIS client is lost
+     * INVOLUNTARILY (e.g. the server auto-released it after a disconnect or a
+     * silence timeout).
+     *
+     * Disambiguation invariant: `releaseLock` clears `heldNodeId` synchronously
+     * BEFORE the release frame reaches the server, so any unlock observation
+     * (node_unlocked broadcast or a lock_state snapshot missing our node) that
+     * arrives while `heldNodeId` is still set cannot be the echo of a voluntary
+     * release — it is involuntary by construction. Never fires for locks held
+     * by other participants or on local `clear()`.
+     */
+    readonly lockLost$: Observable<number> = this.lockLostSubject.asObservable();
 
     constructor() {
         // node_locked — upsert entry; if origin is ours, also record heldNodeId.
@@ -44,7 +61,7 @@ export class PanelLockService {
             }
         });
 
-        // node_unlocked — delete entry; clear heldNodeId if it was ours.
+        // node_unlocked — delete entry; detect involuntary loss of OUR lock.
         this.collaborationPresenceService.nodeUnlocked$.pipe(takeUntilDestroyed()).subscribe((msg) => {
             this._locks.update((map) => {
                 if (!map.has(msg.node_id)) {
@@ -55,11 +72,14 @@ export class PanelLockService {
                 return next;
             });
 
-            const selfId = this.collaborationPresenceService.selfMemberId();
-            if (selfId !== null && msg.origin === selfId) {
-                if (this._heldNodeId() === msg.node_id) {
-                    this._heldNodeId.set(null);
-                }
+            // If heldNodeId still points at this node, the unlock did NOT come
+            // from a local releaseLock call (releaseLock clears heldNodeId before
+            // the server round-trip) — the server released it on its own.
+            // Origin is deliberately not checked: after a reconnect the broadcast
+            // may carry our PREVIOUS connection's member id.
+            if (this._heldNodeId() === msg.node_id) {
+                this._heldNodeId.set(null);
+                this.lockLostSubject.next(msg.node_id);
             }
         });
 
@@ -84,7 +104,17 @@ export class PanelLockService {
                         break;
                     }
                 }
+
+                // Involuntary loss across a reconnect: a disconnected holder never
+                // sees the node_unlocked broadcast — it learns of the release here,
+                // when the fresh snapshot no longer contains its lock (member_id is
+                // per-connection, so the old identity never matches). heldNodeId
+                // still being set means no local releaseLock happened in between.
+                const previousHeldId = this._heldNodeId();
                 this._heldNodeId.set(heldId);
+                if (previousHeldId !== null && heldId !== previousHeldId) {
+                    this.lockLostSubject.next(previousHeldId);
+                }
             }
         });
 

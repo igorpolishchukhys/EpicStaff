@@ -46,6 +46,7 @@ from application.presence_service import PresenceService
 from application.live_document_service import LiveDocumentService
 from application.cursor_service import CursorService
 from application.lock_service import LockService
+from application.heartbeat_monitor import HeartbeatMonitor
 from domain.models.collab_messages import (
     NodeMovedIn,
     CursorMovedIn,
@@ -53,6 +54,7 @@ from domain.models.collab_messages import (
     LockRequestIn,
     LockReleaseIn,
     NodeDataUpdatedIn,
+    HeartbeatIn,
 )
 from pydantic import ValidationError
 from fastapi import Depends
@@ -102,6 +104,28 @@ live_document_service = LiveDocumentService(
 )
 cursor_service = CursorService(registry=collab_registry)
 lock_service = LockService(registry=collab_registry)
+heartbeat_monitor = HeartbeatMonitor()
+
+
+def _release_locks_for_dropped_socket(websocket: WebSocket) -> None:
+    """Registry on_drop hook (EST-9): belt-and-braces lock release.
+
+    Fires when a dead socket is dropped during a broadcast.  The endpoint's
+    finally block is the primary cleanup path; this hook covers sockets it
+    has not reached yet.  Idempotent — release_all_for_member is a no-op
+    when the member holds no locks.
+    """
+    tracked = heartbeat_monitor.lookup(websocket)
+    heartbeat_monitor.forget(websocket)
+    if tracked is None:
+        return
+    dropped_flow_id, dropped_member_id = tracked
+    asyncio.create_task(
+        lock_service.release_all_for_member(dropped_flow_id, dropped_member_id)
+    )
+
+
+collab_registry.add_on_drop(_release_locks_for_dropped_socket)
 
 _voice_settings_cache: dict | None = None
 _voice_settings_cache_time: float = 0.0
@@ -211,6 +235,7 @@ async def startup_event():
 
     asyncio.create_task(_run_forever(redis_listener, "redis_listener"))
     asyncio.create_task(voice_settings_invalidation_listener())
+    asyncio.create_task(_run_forever(heartbeat_monitor.run, "heartbeat_monitor"))
 
 
 # Store active connections and their handlers
@@ -301,6 +326,13 @@ async def collab_presence(
     Outbound rebroadcast (including sender):
       ``{"type": "node_moved", "flow_id": <int>, "node_id": <int>,
          "x": <number>, "y": <number>, "origin": "<member_id>"}``
+
+    Liveness (EST-9):
+      Clients send ``{"type": "heartbeat", "flow_id": <int>}`` every 10s and
+      receive ``{"type": "heartbeat_ack", "flow_id": <int>}`` directly (not
+      broadcast).  Any inbound frame refreshes liveness.  Connections silent
+      for 30s are force-closed by the sweep loop; this endpoint's ``finally``
+      block then releases the member's locks and presence.
     """
     if not token:
         logger.warning("collab_presence: missing token, closing 1008")
@@ -337,6 +369,10 @@ async def collab_presence(
         )
         logger.info("collab_presence: accepted flow={} member={}", flow_id, member_id)
 
+        # EST-9: liveness tracking — silent connections are force-closed by
+        # the heartbeat sweep so the finally block below releases their locks.
+        heartbeat_monitor.track(websocket, flow_id, member_id)
+
         # Send the current document state to the joining socket only.
         doc_state = await live_document_service.get_document_state(flow_id)
         await websocket.send_json(doc_state)
@@ -363,6 +399,9 @@ async def collab_presence(
 
         while True:
             raw = await websocket.receive_text()
+            # ANY inbound frame counts as liveness — heartbeat is only the
+            # guaranteed minimum when the client is otherwise idle.
+            heartbeat_monitor.touch(websocket)
             try:
                 data = json.loads(raw)
                 msg_type = data.get("type")
@@ -391,6 +430,12 @@ async def collab_presence(
                         node_ids=frame.node_ids,
                         origin_member_id=member_id,
                         user_id=user_id,
+                    )
+                elif msg_type == "heartbeat":
+                    frame = HeartbeatIn(**data)
+                    # Direct reply to the sender only — never broadcast.
+                    await websocket.send_json(
+                        {"type": "heartbeat_ack", "flow_id": frame.flow_id}
                     )
                 elif msg_type == "lock_request":
                     frame = LockRequestIn(**data)
@@ -456,7 +501,12 @@ async def collab_presence(
             "collab_presence: disconnected flow={} member={}", flow_id, member_id
         )
     finally:
+        # Single cleanup path (EST-9): reached on protocol-detected
+        # disconnects AND on heartbeat-sweep force-closes (the server-side
+        # close makes the pending receive raise).
+        heartbeat_monitor.forget(websocket)
         if member_id is not None:
+            await lock_service.release_all_for_member(flow_id, member_id)
             await presence_service.leave(flow_id, websocket, member_id)
 
 

@@ -15,8 +15,11 @@ class LockService:
     ``lock_granted`` / ``lock_denied`` reply; it is not stored in the lock
     entry.
 
-    Disconnect cleanup is deliberately absent.  EST-9 will wire that via the
-    registry's on_drop seam.
+    Disconnect cleanup (EST-9): ``release_all_for_member`` releases every
+    lock held by a dropped connection.  It is invoked from the collab
+    endpoint's ``finally`` block (the single cleanup path for both
+    protocol-detected disconnects and heartbeat-sweep force-closes) and,
+    belt-and-braces, from the registry's on_drop seam.
 
     Inbound / outbound frame contracts are frozen by the EST-8 spec and are
     reproduced here for reference:
@@ -37,6 +40,11 @@ class LockService:
     Broadcast (all sockets on the flow, including sender):
         {"type": "node_unlocked", "flow_id": <int>, "node_id": <int>,
          "origin": "<member_id>"}
+
+    Auto-release on disconnect (EST-9) extends the broadcast additively —
+    ``reason`` is present ONLY on auto-release; manual release is unchanged:
+        {"type": "node_unlocked", "flow_id": <int>, "node_id": <int>,
+         "origin": "<dropped holder member_id>", "reason": "disconnected"}
 
     Lock state snapshot
     -------------------
@@ -195,3 +203,52 @@ class LockService:
             node_id,
             member_id,
         )
+
+    async def release_all_for_member(self, flow_id: int, member_id: str) -> None:
+        """Release every lock held by ``member_id`` on ``flow_id`` (EST-9).
+
+        Called when the holder's connection drops (clean disconnect,
+        heartbeat-sweep force-close, or registry on_drop).  Idempotent —
+        a member holding no locks is a no-op, so the converging cleanup
+        paths may all call this safely.
+
+        Each released node is broadcast as ``node_unlocked`` with ``origin``
+        set to the dropped holder's member_id (observers key their
+        lockedByOther maps on origin) plus ``reason: "disconnected"``.
+        """
+        flow_locks = self._locks.get(flow_id)
+        if not flow_locks:
+            return
+
+        released_node_ids = [
+            node_id
+            for node_id, entry in flow_locks.items()
+            if entry["member_id"] == member_id
+        ]
+        if not released_node_ids:
+            return
+
+        # Mutate state BEFORE broadcasting: a broadcast may drop another dead
+        # socket and re-enter this method via the registry's on_drop seam.
+        for node_id in released_node_ids:
+            del flow_locks[node_id]
+        if not flow_locks:
+            del self._locks[flow_id]
+
+        for node_id in released_node_ids:
+            await self._registry.broadcast_json(
+                flow_id,
+                {
+                    "type": "node_unlocked",
+                    "flow_id": flow_id,
+                    "node_id": node_id,
+                    "origin": member_id,
+                    "reason": "disconnected",
+                },
+            )
+            logger.info(
+                "lock AUTO-RELEASED flow={} node={} member={} reason=disconnected",
+                flow_id,
+                node_id,
+                member_id,
+            )

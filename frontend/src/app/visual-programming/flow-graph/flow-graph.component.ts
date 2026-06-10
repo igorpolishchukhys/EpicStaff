@@ -333,6 +333,18 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             }
         });
 
+        // Involuntary lock loss (server auto-released — e.g. disconnect/timeout):
+        // close the open panel for that node without saving and warn the user.
+        // Unsaved edits are intentionally discarded (last-write-wins) — the server
+        // is already rejecting this client's writes for the lost lock.
+        this.panelLockService.lockLost$.pipe(takeUntilDestroyed()).subscribe((nodeId) => {
+            const openNode = this.sidePanelService.selectedNode();
+            if (openNode !== null && openNode.backendId === nodeId) {
+                this.sidePanelService.closePanelOnLockLoss();
+                this.toastService.warning('Your editing lock was released because your connection dropped');
+            }
+        });
+
         // Remote node data update: apply to local flow state.
         this.collaborationPresenceService.remoteNodeDataUpdate$.pipe(takeUntilDestroyed()).subscribe((msg) => {
             if (msg.origin === this.collaborationPresenceService.selfMemberId()) {

@@ -10,6 +10,7 @@ import {
     DocumentStateMessage,
     isCursorMovedMessage,
     isDocumentStateMessage,
+    isHeartbeatAckMessage,
     isLockDeniedMessage,
     isLockGrantedMessage,
     isLockStateMessage,
@@ -37,6 +38,19 @@ import {
 } from './collab-message.model';
 
 const RECONNECT_DELAY_MS = 3_000;
+
+/**
+ * Heartbeat cadence and zombie-connection detection.
+ *
+ * The server force-closes a collab socket (and auto-releases the member's node
+ * locks) when no inbound frame arrives within 30 seconds. These two constants
+ * and that server timeout must change together: the send interval must stay
+ * comfortably below the server timeout, and the ack-staleness threshold mirrors
+ * it on the client side — three missed acks in a row mean the connection is a
+ * zombie and must be torn down so the reconnect path can recover.
+ */
+const HEARTBEAT_INTERVAL_MS = 10_000;
+const HEARTBEAT_ACK_STALENESS_MS = 30_000;
 
 @Injectable({ providedIn: 'root' })
 export class CollaborationPresenceService {
@@ -77,6 +91,8 @@ export class CollaborationPresenceService {
     private connectedFlowId: number | null = null;
     private intentionalClose = false;
     private reconnectTimerId: ReturnType<typeof setTimeout> | null = null;
+    private heartbeatTimerId: ReturnType<typeof setInterval> | null = null;
+    private lastHeartbeatAckAt: number | null = null;
 
     constructor() {
         this.remoteNodeMove$ = this.remoteNodeMoveSubject.asObservable();
@@ -107,6 +123,7 @@ export class CollaborationPresenceService {
     disconnect(): void {
         this.intentionalClose = true;
         this.cancelPendingReconnect();
+        this.stopHeartbeat();
         this.closeSocket();
         this.participantCount.set(0);
         this.participants.set([]);
@@ -231,6 +248,7 @@ export class CollaborationPresenceService {
         webSocket.onopen = (): void => {
             if (this.socket === webSocket) {
                 this.connectionState.set('connected');
+                this.startHeartbeat();
             }
         };
 
@@ -243,6 +261,7 @@ export class CollaborationPresenceService {
                 return;
             }
             this.socket = null;
+            this.stopHeartbeat();
 
             if (this.intentionalClose) {
                 return;
@@ -269,6 +288,12 @@ export class CollaborationPresenceService {
         try {
             parsed = JSON.parse(event.data as string);
         } catch {
+            return;
+        }
+
+        if (isHeartbeatAckMessage(parsed)) {
+            // Liveness bookkeeping only — never forwarded to feature streams.
+            this.lastHeartbeatAckAt = Date.now();
             return;
         }
 
@@ -343,6 +368,55 @@ export class CollaborationPresenceService {
             }
             this.openSocket(flowId, false);
         }, RECONNECT_DELAY_MS);
+    }
+
+    private startHeartbeat(): void {
+        this.stopHeartbeat();
+        // A fresh connection starts with a clean slate so it is not immediately
+        // judged stale by acks that never had a chance to arrive.
+        this.lastHeartbeatAckAt = Date.now();
+        this.heartbeatTimerId = setInterval(() => {
+            this.onHeartbeatTick();
+        }, HEARTBEAT_INTERVAL_MS);
+    }
+
+    private stopHeartbeat(): void {
+        if (this.heartbeatTimerId !== null) {
+            clearInterval(this.heartbeatTimerId);
+            this.heartbeatTimerId = null;
+        }
+        this.lastHeartbeatAckAt = null;
+    }
+
+    private onHeartbeatTick(): void {
+        if (this.socket === null || this.connectedFlowId === null) {
+            this.stopHeartbeat();
+            return;
+        }
+
+        if (this.lastHeartbeatAckAt !== null && Date.now() - this.lastHeartbeatAckAt > HEARTBEAT_ACK_STALENESS_MS) {
+            // Zombie connection: the socket looks open but acks stopped coming,
+            // so either the server cannot hear us or we cannot hear it.
+            this.recoverFromZombieConnection(this.connectedFlowId);
+            return;
+        }
+
+        const message = JSON.stringify({
+            type: 'heartbeat',
+            flow_id: this.connectedFlowId,
+        });
+
+        this.socket.send(message);
+    }
+
+    private recoverFromZombieConnection(flowId: number): void {
+        // closeSocket() detaches the onclose handler, so the close event will
+        // not drive recovery — replicate its steps and hand off to the
+        // existing reconnect path explicitly.
+        this.stopHeartbeat();
+        this.closeSocket();
+        this.connectionState.set('disconnected');
+        this.scheduleReconnect(flowId);
     }
 
     private closeSocket(): void {

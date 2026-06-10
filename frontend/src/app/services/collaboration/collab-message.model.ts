@@ -82,6 +82,8 @@ export interface NodeUnlockedMessage {
     flow_id: number;
     node_id: number;
     origin: string;
+    /** Present only when the server auto-released the lock after the holder disconnected. */
+    reason?: 'disconnected';
 }
 
 export interface LockStateEntry {
@@ -93,6 +95,12 @@ export interface LockStateMessage {
     type: 'lock_state';
     flow_id: number;
     locks: Record<string, LockStateEntry>;
+}
+
+/** Direct server reply to an outbound heartbeat frame (not broadcast to other members). */
+export interface HeartbeatAckMessage {
+    type: 'heartbeat_ack';
+    flow_id: number;
 }
 
 export interface NodeDataUpdatedMessage {
@@ -267,6 +275,16 @@ export function isLockStateMessage(value: unknown): value is LockStateMessage {
         typeof record['flow_id'] === 'number' &&
         typeof record['locks'] === 'object' &&
         record['locks'] !== null
+    );
+}
+
+export function isHeartbeatAckMessage(value: unknown): value is HeartbeatAckMessage {
+    const record = value as Record<string, unknown>;
+    return (
+        typeof value === 'object' &&
+        value !== null &&
+        record['type'] === 'heartbeat_ack' &&
+        typeof record['flow_id'] === 'number'
     );
 }
 
