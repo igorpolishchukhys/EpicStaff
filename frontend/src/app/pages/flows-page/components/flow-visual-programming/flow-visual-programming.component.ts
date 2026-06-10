@@ -55,7 +55,13 @@ import { RunGraphService } from '../../../../features/flows/services/run-graph-s
 import { FlowMessagesPanelComponent } from '../../../../pages/running-graph/components/flow-messages-panel/flow-messages-panel.component';
 import { RunSessionSSEService } from '../../../../pages/running-graph/services/graph-session-sse.service';
 import { ProfileService } from '../../../../services/auth/profile.service';
-import { DocumentStateMessage } from '../../../../services/collaboration/collab-message.model';
+import {
+    ConnectionAddedMessage,
+    ConnectionRemovedMessage,
+    DocumentStateMessage,
+    NodeAddedMessage,
+    NodeDeletedMessage,
+} from '../../../../services/collaboration/collab-message.model';
 import { CollaborationPresenceService } from '../../../../services/collaboration/collaboration-presence.service';
 import { ConfigService } from '../../../../services/config/config.service';
 import { ToastService } from '../../../../services/notifications/toast.service';
@@ -241,7 +247,7 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
                 // Buffer the latest document state — will be applied when load completes.
                 this.pendingDocumentState.set(msg);
             } else {
-                this.flowGraphComponent?.applyDocumentState(msg.positions);
+                this.flowGraphComponent?.applyDocumentState(msg);
             }
         });
 
@@ -255,10 +261,66 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
                 this.pendingDocumentState.set(null);
                 // Defer one tick so the ViewChild (FlowGraphComponent) has rendered.
                 setTimeout(() => {
-                    this.flowGraphComponent?.applyDocumentState(pending.positions);
+                    this.flowGraphComponent?.applyDocumentState(pending);
                 }, 0);
             }
         });
+
+        // Collaboration: apply remote node_added — filter self-echoes, guard flow_id.
+        this.collaborationPresenceService.remoteNodeAdded$
+            .pipe(takeUntilDestroyed(this.destroyRef))
+            .subscribe((msg: NodeAddedMessage) => {
+                if (msg.origin === this.collaborationPresenceService.selfMemberId()) {
+                    return;
+                }
+                const currentId = this.graphState()?.id;
+                if (msg.flow_id !== currentId) {
+                    return;
+                }
+                this.flowGraphComponent?.applyRemoteAddNode(msg);
+            });
+
+        // Collaboration: apply remote node_deleted — filter self-echoes, guard flow_id.
+        this.collaborationPresenceService.remoteNodeDeleted$
+            .pipe(takeUntilDestroyed(this.destroyRef))
+            .subscribe((msg: NodeDeletedMessage) => {
+                if (msg.origin === this.collaborationPresenceService.selfMemberId()) {
+                    return;
+                }
+                const currentId = this.graphState()?.id;
+                if (msg.flow_id !== currentId) {
+                    return;
+                }
+                this.flowGraphComponent?.applyRemoteDeleteNode(msg);
+            });
+
+        // Collaboration: apply remote connection_added — filter self-echoes, guard flow_id.
+        this.collaborationPresenceService.remoteConnectionAdded$
+            .pipe(takeUntilDestroyed(this.destroyRef))
+            .subscribe((msg: ConnectionAddedMessage) => {
+                if (msg.origin === this.collaborationPresenceService.selfMemberId()) {
+                    return;
+                }
+                const currentId = this.graphState()?.id;
+                if (msg.flow_id !== currentId) {
+                    return;
+                }
+                this.flowGraphComponent?.applyRemoteAddConnection(msg);
+            });
+
+        // Collaboration: apply remote connection_removed — filter self-echoes, guard flow_id.
+        this.collaborationPresenceService.remoteConnectionRemoved$
+            .pipe(takeUntilDestroyed(this.destroyRef))
+            .subscribe((msg: ConnectionRemovedMessage) => {
+                if (msg.origin === this.collaborationPresenceService.selfMemberId()) {
+                    return;
+                }
+                const currentId = this.graphState()?.id;
+                if (msg.flow_id !== currentId) {
+                    return;
+                }
+                this.flowGraphComponent?.applyRemoteRemoveConnection(msg);
+            });
     }
 
     public ngOnInit(): void {

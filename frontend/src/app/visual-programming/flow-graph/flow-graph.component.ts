@@ -45,6 +45,12 @@ import {
 } from '@foblex/flow';
 import { Subject } from 'rxjs';
 
+import {
+    ConnectionAddedMessage,
+    ConnectionRemovedMessage,
+    NodeAddedMessage,
+    NodeDeletedMessage,
+} from '../../services/collaboration/collab-message.model';
 import { CollaborationPresenceService } from '../../services/collaboration/collaboration-presence.service';
 import { ToastService } from '../../services/notifications/toast.service';
 import { AppSvgIconComponent } from '../../shared/components/app-svg-icon/app-svg-icon.component';
@@ -253,6 +259,12 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
 
     /** Ids of nodes currently being dragged by the local user — used to ignore echo moves. */
     private readonly locallyDraggingNodeIds = new Set<string>();
+    /**
+     * True while a remote structural op (add/delete node or connection) is being applied
+     * from a collaboration message. Guards against re-emitting outbound ops for remote-
+     * originated changes.
+     */
+    private applyingRemote = false;
     /** Timestamp of the last throttled node_moved op sent per node id, for ~50 ms trailing throttle. */
     private readonly lastMoveSentAt = new Map<string, number>();
     /** Timestamp of last cursor op sent, for ~40 ms trailing throttle. */
@@ -490,6 +502,19 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
                 this.bumpConnectionRenderVersion(newConnection.id);
             }
         }
+
+        if (!this.applyingRemote) {
+            const sourceNode = this.flowService.nodes().find((n) => n.id === sourceNodeId);
+            const targetNode = this.flowService.nodes().find((n) => n.id === targetNodeId);
+            this.collaborationPresenceService.sendConnectionAdd({
+                connection_id: newConnection.id,
+                source_node_key: sourceNode ? this.nodeKey(sourceNode) : sourceNodeId,
+                target_node_key: targetNode ? this.nodeKey(targetNode) : targetNodeId,
+                source_port_id: newConnection.sourcePortId,
+                target_port_id: newConnection.targetPortId,
+                connection: newConnection,
+            });
+        }
     }
 
     public onCopy(): void {
@@ -637,6 +662,13 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             ),
         };
         this.flowService.updateNode(updatedNode);
+
+        if (!this.applyingRemote) {
+            this.collaborationPresenceService.sendNodeAdd({
+                node_key: this.nodeKey(updatedNode),
+                node: updatedNode,
+            });
+        }
     }
 
     public onContextMenu(event: MouseEvent): void {
@@ -668,6 +700,13 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
         );
         const newNode = this.nodeFactory.createNode(event.type, { ...event.overrides, position });
         this.flowService.addNode(newNode);
+
+        if (!this.applyingRemote) {
+            this.collaborationPresenceService.sendNodeAdd({
+                node_key: this.nodeKey(newNode),
+                node: newNode,
+            });
+        }
     }
 
     public onOpenNodePanel(node: NodeModel): void {
@@ -1072,15 +1111,41 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     /**
      * Bulk-applies document state positions (called once after the flow loads).
      * Skips nodes currently being dragged locally; triggers one redraw at the end.
+     *
+     * When the snapshot carries schema_version >= 2 (nodes / connections / tombstones),
+     * also reconciles structural additions and removals:
+     *  - adds nodes present in snapshot but missing locally
+     *  - adds connections whose endpoints are now locally present but connection is missing
+     *  - removes anything recorded in tombstones
      */
-    public applyDocumentState(positions: Record<string, { x: number; y: number }>): void {
-        let anyApplied = false;
-        for (const [backendIdStr, pos] of Object.entries(positions)) {
-            const backendId = Number(backendIdStr);
-            if (!Number.isFinite(backendId)) {
-                continue;
+    public applyDocumentState(snapshot: {
+        positions: Record<string, { x: number; y: number }>;
+        schema_version?: number;
+        nodes?: Record<string, unknown>;
+        connections?: Record<
+            string,
+            {
+                source_node_key: string;
+                target_node_key: string;
+                source_port_id: string;
+                target_port_id: string;
+                connection: unknown;
             }
-            const node = this.flowService.nodes().find((n) => n.backendId === backendId);
+        >;
+        tombstones?: Record<string, string>;
+    }): void {
+        const {
+            positions,
+            schema_version,
+            nodes: snapshotNodes,
+            connections: snapshotConnections,
+            tombstones,
+        } = snapshot;
+
+        // --- Apply positions (dual-key: matches n.id === nodeKey OR String(n.backendId) === nodeKey) ---
+        let anyApplied = false;
+        for (const [nodeKey, pos] of Object.entries(positions)) {
+            const node = this.flowService.nodes().find((n) => n.id === nodeKey || String(n.backendId) === nodeKey);
             if (!node) {
                 continue;
             }
@@ -1090,6 +1155,105 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             this.flowService.applyRemotePosition(node.id, pos);
             anyApplied = true;
         }
+
+        // --- Schema v2: structural reconciliation ---
+        const isV2 = typeof schema_version === 'number' ? schema_version >= 2 : false;
+
+        if (isV2) {
+            // Apply tombstones first — drop nodes/connections that were deleted remotely.
+            if (tombstones) {
+                for (const tombstoneKey of Object.keys(tombstones)) {
+                    if (tombstoneKey.startsWith('node:')) {
+                        const nodeKey = tombstoneKey.slice('node:'.length);
+                        const existing = this.flowService
+                            .nodes()
+                            .find((n) => n.id === nodeKey || String(n.backendId) === nodeKey);
+                        if (existing) {
+                            this.applyingRemote = true;
+                            try {
+                                this.flowService.applyRemoteDeleteNode(nodeKey, []);
+                            } finally {
+                                this.applyingRemote = false;
+                            }
+                            anyApplied = true;
+                        }
+                    } else if (tombstoneKey.startsWith('conn:')) {
+                        const connId = tombstoneKey.slice('conn:'.length);
+                        this.applyingRemote = true;
+                        try {
+                            this.flowService.applyRemoteRemoveConnection(connId);
+                        } finally {
+                            this.applyingRemote = false;
+                        }
+                        anyApplied = true;
+                    }
+                }
+            }
+
+            // Add nodes present in snapshot but missing locally.
+            if (snapshotNodes) {
+                for (const [nodeKey, nodePayload] of Object.entries(snapshotNodes)) {
+                    const alreadyPresent = this.flowService
+                        .nodes()
+                        .find((n) => n.id === nodeKey || String(n.backendId) === nodeKey);
+                    if (!alreadyPresent) {
+                        this.applyingRemote = true;
+                        try {
+                            this.flowService.applyRemoteAddNode(nodeKey, nodePayload as NodeModel);
+                        } finally {
+                            this.applyingRemote = false;
+                        }
+                        anyApplied = true;
+                    }
+                }
+            }
+
+            // Add connections present in snapshot but missing locally (re-add previously dropped ones too).
+            if (snapshotConnections) {
+                for (const [connId, connEntry] of Object.entries(snapshotConnections)) {
+                    const alreadyPresent = this.flowService.connections().some((c) => c.id === connId);
+                    if (!alreadyPresent) {
+                        const sourcePortId = connEntry.source_port_id as CustomPortId;
+                        const targetPortId = connEntry.target_port_id as CustomPortId;
+                        const sourceNodeId = sourcePortId.split('_')[0];
+                        const targetNodeId = targetPortId.split('_')[0];
+                        const storedConn = connEntry.connection;
+                        const isStoredConnUsable =
+                            typeof storedConn === 'object' &&
+                            storedConn !== null &&
+                            typeof (storedConn as Record<string, unknown>)['id'] === 'string';
+                        const connectionModel: ConnectionModel = isStoredConnUsable
+                            ? {
+                                  ...(storedConn as ConnectionModel),
+                                  id: connId,
+                                  sourceNodeId,
+                                  targetNodeId,
+                                  sourcePortId,
+                                  targetPortId,
+                              }
+                            : {
+                                  id: connId,
+                                  category: 'default',
+                                  sourceNodeId,
+                                  targetNodeId,
+                                  sourcePortId,
+                                  targetPortId,
+                                  behavior: 'fixed',
+                                  type: 'segment',
+                                  data: null,
+                              };
+                        this.applyingRemote = true;
+                        try {
+                            this.flowService.applyRemoteAddConnection(connectionModel);
+                        } finally {
+                            this.applyingRemote = false;
+                        }
+                        anyApplied = true;
+                    }
+                }
+            }
+        }
+
         if (anyApplied) {
             this.cd.detectChanges();
             this.fFlowComponent?.redraw();
@@ -1116,6 +1280,98 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
 
         const newPorts = generatePortsForNode(node.id, node.type, data);
         this.flowService.applyRemoteNodeData(node.id, nodeName, data, newPorts);
+        this.cd.detectChanges();
+        this.fFlowComponent?.redraw();
+    }
+
+    /**
+     * Applies a remote node-add broadcast from another participant.
+     * Validates the payload minimally before touching canvas state — drops malformed
+     * frames without throwing so a bad peer message cannot corrupt local state.
+     * Resolves the node payload, calls the undo-bypassing FlowService method, then redraws.
+     */
+    public applyRemoteAddNode(msg: NodeAddedMessage): void {
+        const payload = msg.node;
+        if (
+            typeof payload !== 'object' ||
+            payload === null ||
+            typeof (payload as Record<string, unknown>)['id'] !== 'string' ||
+            ((payload as Record<string, unknown>)['id'] as string).length === 0 ||
+            !(Object.values(NodeType) as unknown[]).includes((payload as Record<string, unknown>)['type'])
+        ) {
+            console.warn('[collab] applyRemoteAddNode: dropped malformed node payload', payload);
+            return;
+        }
+        const nodeModel = payload as NodeModel;
+        this.applyingRemote = true;
+        try {
+            this.flowService.applyRemoteAddNode(msg.node_key, nodeModel);
+        } finally {
+            this.applyingRemote = false;
+        }
+        this.cd.detectChanges();
+        this.fFlowComponent?.redraw();
+    }
+
+    /**
+     * Applies a remote node-delete broadcast from another participant.
+     * Uses the server-supplied cascade connection list verbatim — does not recompute orphans.
+     */
+    public applyRemoteDeleteNode(msg: NodeDeletedMessage): void {
+        this.applyingRemote = true;
+        try {
+            this.flowService.applyRemoteDeleteNode(msg.node_key, msg.removed_connection_ids);
+        } finally {
+            this.applyingRemote = false;
+        }
+        this.cd.detectChanges();
+        this.fFlowComponent?.redraw();
+    }
+
+    /**
+     * Applies a remote connection-add broadcast from another participant.
+     * Drops the op if either endpoint node is not yet locally present (it will be
+     * recovered by the next document_state resync).
+     */
+    public applyRemoteAddConnection(msg: ConnectionAddedMessage): void {
+        const sourcePortId = msg.source_port_id as CustomPortId;
+        const targetPortId = msg.target_port_id as CustomPortId;
+        const sourceNodeId = sourcePortId.split('_')[0];
+        const targetNodeId = targetPortId.split('_')[0];
+
+        const connectionModel: ConnectionModel = {
+            id: msg.connection_id,
+            category: 'default',
+            sourceNodeId,
+            targetNodeId,
+            sourcePortId,
+            targetPortId,
+            behavior: 'fixed',
+            type: 'segment',
+            data: null,
+        };
+
+        this.applyingRemote = true;
+        try {
+            this.flowService.applyRemoteAddConnection(connectionModel);
+        } finally {
+            this.applyingRemote = false;
+        }
+        this.cd.detectChanges();
+        this.fFlowComponent?.redraw();
+    }
+
+    /**
+     * Applies a remote connection-remove broadcast from another participant.
+     * Missing connection is a no-op (idempotent).
+     */
+    public applyRemoteRemoveConnection(msg: ConnectionRemovedMessage): void {
+        this.applyingRemote = true;
+        try {
+            this.flowService.applyRemoteRemoveConnection(msg.connection_id);
+        } finally {
+            this.applyingRemote = false;
+        }
         this.cd.detectChanges();
         this.fFlowComponent?.redraw();
     }
@@ -1405,6 +1661,15 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
         afterNextRender(() => this.nodePanelShell?.expandPanel(), { injector: this.injector });
     }
 
+    /**
+     * Computes node_key per rule 1A:
+     * - Saved node (backendId != null): String(backendId)
+     * - Unsaved node (backendId == null): node.id (uuid)
+     */
+    private nodeKey(node: NodeModel): string {
+        return node.backendId != null ? String(node.backendId) : node.id;
+    }
+
     private toFlowPosition(point: IPoint): IPoint {
         return this.fFlowComponent.getPositionInFlow(PointExtensions.initialize(point.x, point.y));
     }
@@ -1421,6 +1686,49 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             const node = this.flowService.nodes().find((n) => n.id === nodeId);
             return node && node.type !== NodeType.START;
         });
+
+        if (!this.applyingRemote) {
+            // Snapshot current state BEFORE deletion to compute outbound ops.
+            const currentNodes = this.flowService.nodes();
+            const currentConnections = this.flowService.connections();
+            const nodeIdsToDeleteSet = new Set(nodeIdsToDelete);
+
+            // Detect EDGE auto-deletes: connections being removed whose target is an EDGE node.
+            const autoDeletedEdgeNodeIds = new Set<string>();
+            for (const conn of currentConnections) {
+                const connId = selections.fConnectionIds.includes(conn.id) ? conn.id : null;
+                if (!connId) continue;
+                const targetNode = currentNodes.find((n) => n.id === conn.targetNodeId);
+                if (targetNode?.type === NodeType.EDGE) {
+                    autoDeletedEdgeNodeIds.add(targetNode.id);
+                    nodeIdsToDeleteSet.add(targetNode.id);
+                }
+            }
+
+            // Connections to emit removes for (explicitly selected + orphaned by node deletes).
+            const connectionIdsToEmit = new Set<string>();
+            for (const connId of selections.fConnectionIds) {
+                connectionIdsToEmit.add(connId);
+            }
+            for (const conn of currentConnections) {
+                if (nodeIdsToDeleteSet.has(conn.sourceNodeId) || nodeIdsToDeleteSet.has(conn.targetNodeId)) {
+                    connectionIdsToEmit.add(conn.id);
+                }
+            }
+
+            // Emit connection_removed for each connection being deleted.
+            for (const connId of connectionIdsToEmit) {
+                this.collaborationPresenceService.sendConnectionRemove({ connection_id: connId });
+            }
+
+            // Emit node_deleted for each node being deleted (explicit + EDGE auto-deletes).
+            for (const nodeId of nodeIdsToDeleteSet) {
+                const node = currentNodes.find((n) => n.id === nodeId);
+                if (node) {
+                    this.collaborationPresenceService.sendNodeDelete({ node_key: this.nodeKey(node) });
+                }
+            }
+        }
 
         this.flowService.deleteSelections({
             fNodeIds: nodeIdsToDelete,

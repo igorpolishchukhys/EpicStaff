@@ -105,3 +105,82 @@ class SelectionChangedIn(BaseModel):
     type: str
     flow_id: int
     node_ids: list[int]
+
+
+class NodeAddedIn(BaseModel):
+    """Inbound frame sent by a client when a new node is added to the canvas.
+
+    Frozen contract (FE built against these field names):
+        {"type": "node_added", "flow_id": <int>, "node_key": "<str>", "node": {...}}
+
+    ``node_key`` is the frontend uuid for unsaved nodes, or str(backendId) for saved
+    nodes.  ``node`` is an opaque serialised NodeModel payload — the FE owns its
+    shape; stored and echoed verbatim.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    flow_id: int
+    node_key: str
+    node: dict
+
+
+class NodeDeletedIn(BaseModel):
+    """Inbound frame sent by a client when a node is removed from the canvas.
+
+    Frozen contract (FE built against these field names):
+        {"type": "node_deleted", "flow_id": <int>, "node_key": "<str>"}
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    flow_id: int
+    node_key: str
+
+
+class ConnectionAddedIn(BaseModel):
+    """Inbound frame sent by a client when a connection is drawn between two nodes.
+
+    Frozen contract (FE built against these field names):
+        {
+          "type": "connection_added",
+          "flow_id": <int>,
+          "connection_id": "<str>",
+          "source_node_key": "<str>",
+          "target_node_key": "<str>",
+          "source_port_id": "<str>",
+          "target_port_id": "<str>",
+          "connection": {...}
+        }
+
+    ``connection`` is an opaque serialised connection payload — stored and echoed
+    verbatim.  If either endpoint node_key has no node record the frame is
+    dropped (recovered on document_state resync).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    flow_id: int
+    connection_id: str
+    source_node_key: str
+    target_node_key: str
+    source_port_id: str
+    target_port_id: str
+    connection: dict
+
+
+class ConnectionRemovedIn(BaseModel):
+    """Inbound frame sent by a client when a connection is removed.
+
+    Frozen contract (FE built against these field names):
+        {"type": "connection_removed", "flow_id": <int>, "connection_id": "<str>"}
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    flow_id: int
+    connection_id: str

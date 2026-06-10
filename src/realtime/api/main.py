@@ -55,6 +55,10 @@ from domain.models.collab_messages import (
     LockReleaseIn,
     NodeDataUpdatedIn,
     HeartbeatIn,
+    NodeAddedIn,
+    NodeDeletedIn,
+    ConnectionAddedIn,
+    ConnectionRemovedIn,
 )
 from pydantic import ValidationError
 from fastapi import Depends
@@ -315,17 +319,39 @@ async def collab_presence(
       1. The client is added to the flow's presence set; all sockets on
          the flow receive ``{"type": "presence", "flow_id": <int>, "count": <int>}``.
       2. The joining socket immediately receives a
-         ``{"type": "document_state", "flow_id": <int>, "positions": {...}}``
-         snapshot (empty when no moves have been recorded yet).
+         ``{"type": "document_state", ...}`` snapshot (see below).
 
-    Inbound frames:
+    Inbound frames (structural sync — Phase 1 / EST-6):
+      ``{"type": "node_added",        "flow_id": <int>, "node_key": "<str>", "node": {...}}``
+      ``{"type": "node_deleted",       "flow_id": <int>, "node_key": "<str>"}``
+      ``{"type": "connection_added",   "flow_id": <int>, "connection_id": "<str>",
+         "source_node_key": "<str>", "target_node_key": "<str>",
+         "source_port_id": "<str>", "target_port_id": "<str>", "connection": {...}}``
+      ``{"type": "connection_removed", "flow_id": <int>, "connection_id": "<str>"}``
+
+    Inbound frames (position sync — legacy):
       ``{"type": "node_moved", "flow_id": <int>, "node_id": <int>, "x": <number>, "y": <number>}``
-      Validated with ``NodeMovedIn``; malformed / unknown-type frames are
-      silently ignored (logged at warning) and the connection is NOT closed.
+
+    All inbound frames are validated with their matching ``*In`` Pydantic model;
+    malformed / unknown-type frames are silently ignored (logged at warning)
+    and the connection is NOT closed.
 
     Outbound rebroadcast (including sender):
-      ``{"type": "node_moved", "flow_id": <int>, "node_id": <int>,
-         "x": <number>, "y": <number>, "origin": "<member_id>"}``
+      ``{"type": "node_moved",         ..., "origin": "<member_id>"}``
+      ``{"type": "node_added",         "flow_id": <int>, "node_key": "<str>",
+         "node": {...}, "origin": "<member_id>"}``
+      ``{"type": "node_deleted",       "flow_id": <int>, "node_key": "<str>",
+         "removed_connection_ids": ["<str>", ...], "origin": "<member_id>"}``
+      ``{"type": "connection_added",   "flow_id": <int>, "connection_id": "<str>",
+         "source_node_key": "<str>", "target_node_key": "<str>",
+         "source_port_id": "<str>", "target_port_id": "<str>",
+         "connection": {...}, "origin": "<member_id>"}``
+      ``{"type": "connection_removed", "flow_id": <int>,
+         "connection_id": "<str>", "origin": "<member_id>"}``
+
+    document_state snapshot (sent to late-joiners on connect):
+      ``{"type": "document_state", "flow_id": <int>, "schema_version": 2,
+         "positions": {...}, "nodes": {...}, "connections": {...}, "tombstones": {...}}``
 
     Liveness (EST-9):
       Clients send ``{"type": "heartbeat", "flow_id": <int>}`` every 10s and
@@ -482,6 +508,40 @@ async def collab_presence(
                             frame.node_id,
                             member_id,
                         )
+                elif msg_type == "node_added":
+                    frame = NodeAddedIn(**data)
+                    await live_document_service.apply_node_added(
+                        flow_id=frame.flow_id,
+                        node_key=frame.node_key,
+                        node=frame.node,
+                        origin_member_id=member_id,
+                    )
+                elif msg_type == "node_deleted":
+                    frame = NodeDeletedIn(**data)
+                    await live_document_service.apply_node_deleted(
+                        flow_id=frame.flow_id,
+                        node_key=frame.node_key,
+                        origin_member_id=member_id,
+                    )
+                elif msg_type == "connection_added":
+                    frame = ConnectionAddedIn(**data)
+                    await live_document_service.apply_connection_added(
+                        flow_id=frame.flow_id,
+                        connection_id=frame.connection_id,
+                        source_node_key=frame.source_node_key,
+                        target_node_key=frame.target_node_key,
+                        source_port_id=frame.source_port_id,
+                        target_port_id=frame.target_port_id,
+                        connection=frame.connection,
+                        origin_member_id=member_id,
+                    )
+                elif msg_type == "connection_removed":
+                    frame = ConnectionRemovedIn(**data)
+                    await live_document_service.apply_connection_removed(
+                        flow_id=frame.flow_id,
+                        connection_id=frame.connection_id,
+                        origin_member_id=member_id,
+                    )
                 else:
                     logger.warning(
                         "collab_presence: unknown frame type={} flow={} member={}",

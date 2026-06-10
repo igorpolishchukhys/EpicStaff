@@ -231,6 +231,104 @@ export class FlowService {
     }
 
     /**
+     * Resolves a node_key to a local node using dual-key lookup:
+     * matches n.id === node_key OR String(n.backendId) === node_key.
+     */
+    private resolveNodeByKey(node_key: string): NodeModel | undefined {
+        return this.nodes().find((n) => n.id === node_key || String(n.backendId) === node_key);
+    }
+
+    /**
+     * Applies a remote node-add operation received via the collaboration WebSocket.
+     * Add-exists guard: if a node with the same node_key already exists (by dual-key
+     * lookup), the op is silently dropped (idempotent).
+     *
+     * Intentionally bypasses undo/redo and all local side-effects.
+     */
+    public applyRemoteAddNode(node_key: string, nodeModel: NodeModel): void {
+        const existing = this.resolveNodeByKey(node_key);
+        if (existing) {
+            return;
+        }
+        this.flowSignal.update((flow: FlowModel) => ({
+            ...flow,
+            nodes: [...flow.nodes, nodeModel],
+        }));
+    }
+
+    /**
+     * Applies a remote node-delete operation received via the collaboration WebSocket.
+     * Resolves the node by dual-key lookup. If not found, the op is a no-op (idempotent).
+     * Removes the node AND exactly the supplied connection ids — does NOT recompute
+     * orphaned connections locally (server cascade is authoritative).
+     *
+     * Intentionally bypasses undo/redo and decision-table sync.
+     */
+    public applyRemoteDeleteNode(node_key: string, removedConnectionIds: string[]): void {
+        const target = this.resolveNodeByKey(node_key);
+        if (!target) {
+            return;
+        }
+        const targetId = target.id;
+        const connectionIdsToRemove = new Set(removedConnectionIds);
+
+        this.flowSignal.update((flow: FlowModel) => ({
+            ...flow,
+            nodes: flow.nodes.filter((n) => n.id !== targetId),
+            connections: flow.connections.filter((c) => !connectionIdsToRemove.has(c.id)),
+        }));
+    }
+
+    /**
+     * Applies a remote connection-add operation received via the collaboration WebSocket.
+     * If either endpoint node is absent (dual-key lookup), the op is DROPPED — it will
+     * be recovered by the next document_state resync.
+     * If the connection already exists (same id), the op is dropped (idempotent).
+     *
+     * Intentionally bypasses undo/redo and decision-table connection-sync side-effects.
+     */
+    public applyRemoteAddConnection(connectionModel: ConnectionModel): boolean {
+        const sourceExists = this.nodes().some(
+            (n) => n.id === connectionModel.sourceNodeId || String(n.backendId) === connectionModel.sourceNodeId
+        );
+        const targetExists = this.nodes().some(
+            (n) => n.id === connectionModel.targetNodeId || String(n.backendId) === connectionModel.targetNodeId
+        );
+
+        if (!sourceExists || !targetExists) {
+            return false;
+        }
+
+        const alreadyExists = this.connections().some((c) => c.id === connectionModel.id);
+        if (alreadyExists) {
+            return true;
+        }
+
+        this.flowSignal.update((flow: FlowModel) => ({
+            ...flow,
+            connections: [...flow.connections, connectionModel],
+        }));
+        return true;
+    }
+
+    /**
+     * Applies a remote connection-remove operation received via the collaboration WebSocket.
+     * If the connection is not found, the op is a no-op (idempotent).
+     *
+     * Intentionally bypasses undo/redo and decision-table sync.
+     */
+    public applyRemoteRemoveConnection(connection_id: string): void {
+        const exists = this.connections().some((c) => c.id === connection_id);
+        if (!exists) {
+            return;
+        }
+        this.flowSignal.update((flow: FlowModel) => ({
+            ...flow,
+            connections: flow.connections.filter((c) => c.id !== connection_id),
+        }));
+    }
+
+    /**
      * Updates only the position of a single node in the flow signal.
      * Used exclusively for remote collaboration moves — does NOT touch undo/redo,
      * does NOT trigger decision-table connection-sync logic, and does NOT emit
