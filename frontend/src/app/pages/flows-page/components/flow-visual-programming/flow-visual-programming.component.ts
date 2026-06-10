@@ -54,6 +54,7 @@ import { FlowsStorageService } from '../../../../features/flows/services/flows-s
 import { RunGraphService } from '../../../../features/flows/services/run-graph-session.service';
 import { FlowMessagesPanelComponent } from '../../../../pages/running-graph/components/flow-messages-panel/flow-messages-panel.component';
 import { RunSessionSSEService } from '../../../../pages/running-graph/services/graph-session-sse.service';
+import { ProfileService } from '../../../../services/auth/profile.service';
 import { DocumentStateMessage } from '../../../../services/collaboration/collab-message.model';
 import { CollaborationPresenceService } from '../../../../services/collaboration/collaboration-presence.service';
 import { ConfigService } from '../../../../services/config/config.service';
@@ -86,6 +87,7 @@ import {
 } from '../../../../visual-programming/utils/save';
 import { FlowUnsavedStateService } from '../../services/flow-unsaved-state.service';
 import { FlowHeaderComponent } from './components/header/flow-header.component';
+import { PresenceAvatarStackComponent } from './components/presence-avatar-stack/presence-avatar-stack.component';
 import { ShortcutsModalComponent } from './components/shortcuts-modal/shortcuts-modal.component';
 import { FLOW_SHORTCUT_SECTIONS } from './flow-shortcuts.config';
 
@@ -97,6 +99,7 @@ import { FLOW_SHORTCUT_SECTIONS } from './flow-shortcuts.config';
         AppSvgIconComponent,
         FlowHeaderComponent,
         FlowGraphComponent,
+        PresenceAvatarStackComponent,
         SpinnerComponent,
         ShortcutsModalComponent,
         FlowMessagesPanelComponent,
@@ -153,8 +156,11 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
     }
 
     public readonly presenceCount = computed(() => this.collaborationPresenceService.participantCount());
+    public readonly presenceParticipants = computed(() => this.collaborationPresenceService.participants());
+    public readonly currentUserId = computed<number | null>(() => this.profileService.currentUserSignal()?.id ?? null);
 
     private readonly collaborationPresenceService = inject(CollaborationPresenceService);
+    private readonly profileService = inject(ProfileService);
 
     constructor(
         private readonly route: ActivatedRoute,

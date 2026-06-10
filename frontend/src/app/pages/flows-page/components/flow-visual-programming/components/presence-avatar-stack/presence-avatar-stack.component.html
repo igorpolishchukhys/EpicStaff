@@ -1,0 +1,18 @@
+@for (avatar of visibleAvatars(); track avatar.userId) {
+    <span
+        class="avatar"
+        [class.avatar--you]="avatar.isCurrentUser"
+        [ngStyle]="{ '--avatar-color': avatar.color }"
+        [title]="avatar.label"
+        [attr.aria-label]="avatar.label"
+        >{{ avatar.initials }}</span
+    >
+}
+
+@if (overflowCount() > 0) {
+    <span
+        class="avatar avatar--overflow"
+        [title]="'+' + overflowCount() + ' more'"
+        >+{{ overflowCount() }}</span
+    >
+}

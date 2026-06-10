@@ -19,7 +19,13 @@
 
     <div class="body">
         @if (presenceCount() > 1) {
-            <span class="presence-indicator">{{ presenceCount() }} in this flow</span>
+            <div class="presence-bar">
+                <app-presence-avatar-stack
+                    [participants]="presenceParticipants()"
+                    [currentUserId]="currentUserId()"
+                ></app-presence-avatar-stack>
+                <span class="presence-indicator">{{ presenceCount() }} in this flow</span>
+            </div>
         }
         @if (restoreWarnings().length > 0) {
             <button

@@ -1,7 +1,13 @@
+export interface PresenceParticipant {
+    user_id: number;
+    display_name: string | null;
+}
+
 export interface PresenceMessage {
     type: 'presence';
     flow_id: number;
     count: number;
+    participants?: PresenceParticipant[];
 }
 
 export interface NodeMovedMessage {

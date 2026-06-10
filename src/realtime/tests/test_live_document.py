@@ -91,7 +91,7 @@ def _build_app(
         await websocket.accept()
         member_id: str | None = None
         try:
-            member_id = await presence_service.join(flow_id, websocket)
+            member_id = await presence_service.join(flow_id, websocket, user_id=1)
 
             # Send document state snapshot to the joining socket.
             doc_state = await live_document_service.get_document_state(flow_id)

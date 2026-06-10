@@ -1,0 +1,41 @@
+:host {
+    display: inline-flex;
+    align-items: center;
+    flex-direction: row-reverse; // rightmost in DOM = leftmost visually (standard avatar stack)
+}
+
+.avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 50%;
+    border: 2px solid var(--color-background-body);
+    background-color: var(--avatar-color, var(--accent-color));
+    color: var(--color-ks-primary, #0a0a0a);
+    font-size: 0.625rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    cursor: default;
+    user-select: none;
+    margin-left: -0.5rem; // overlap
+
+    // First child needs no negative margin (rightmost in flex-direction: row-reverse)
+    &:first-child {
+        margin-left: 0;
+    }
+
+    &--you {
+        box-shadow: 0 0 0 2px var(--avatar-color, var(--accent-color));
+        border-color: var(--color-background-body);
+    }
+
+    &--overflow {
+        background-color: var(--color-divider-subtle);
+        color: var(--text-secondary-60);
+        font-size: 0.6rem;
+        letter-spacing: -0.02em;
+    }
+}

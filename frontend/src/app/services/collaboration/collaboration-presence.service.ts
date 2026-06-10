@@ -11,6 +11,7 @@ import {
     isPresenceMessage,
     NodeMovedMessage,
     NodeMoveOp,
+    PresenceParticipant,
 } from './collab-message.model';
 
 const RECONNECT_DELAY_MS = 3_000;
@@ -19,6 +20,7 @@ const RECONNECT_DELAY_MS = 3_000;
 export class CollaborationPresenceService {
     // --- Signals ---
     readonly participantCount = signal<number>(0);
+    readonly participants = signal<PresenceParticipant[]>([]);
     readonly connectionState = signal<CollabConnectionState>('disconnected');
 
     // --- Observables ---
@@ -60,6 +62,7 @@ export class CollaborationPresenceService {
         this.cancelPendingReconnect();
         this.closeSocket();
         this.participantCount.set(0);
+        this.participants.set([]);
         this.connectionState.set('disconnected');
         this.connectedFlowId = null;
     }
@@ -149,6 +152,7 @@ export class CollaborationPresenceService {
 
         if (isPresenceMessage(parsed)) {
             this.participantCount.set(parsed.count);
+            this.participants.set(parsed.participants ?? []);
             return;
         }
 

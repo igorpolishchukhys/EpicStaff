@@ -1092,3 +1092,106 @@ class TestPasswordResetRequestThrottleNonString:
         assert any(
             "must be a string" in e["reason"].lower() for e in email_errors
         ), body
+
+
+# ---------------- Token introspect — display_name (EST-3) ----------------
+
+
+@pytest.mark.django_db
+def test_token_introspect_active_token_includes_display_name(
+    api_client, regular_user, user_api_key
+):
+    """Active token response must include display_name from the user record."""
+    regular_user.display_name = "Alice Smith"
+    regular_user.save(update_fields=["display_name"])
+
+    raw_key, _key_obj = user_api_key
+    access = str(RefreshToken.for_user(regular_user).access_token)
+
+    r = api_client.post(
+        reverse("token_introspect"),
+        data={"token": access},
+        format="json",
+        HTTP_X_API_KEY=raw_key,
+    )
+    assert r.status_code == 200, r.content
+    body = r.json()
+    assert set(body.keys()) == {"active", "user_id", "email", "scopes", "display_name"}
+    assert body["active"] is True
+    assert body["user_id"] == regular_user.id
+    assert body["display_name"] == "Alice Smith"
+
+
+@pytest.mark.django_db
+def test_token_introspect_active_token_null_display_name_when_unset(
+    api_client, regular_user, user_api_key
+):
+    """display_name is null when the user has not set one."""
+    # regular_user.display_name is None by default.
+    assert regular_user.display_name is None
+
+    raw_key, _key_obj = user_api_key
+    access = str(RefreshToken.for_user(regular_user).access_token)
+
+    r = api_client.post(
+        reverse("token_introspect"),
+        data={"token": access},
+        format="json",
+        HTTP_X_API_KEY=raw_key,
+    )
+    assert r.status_code == 200, r.content
+    body = r.json()
+    assert body["active"] is True
+    assert body["display_name"] is None
+
+
+@pytest.mark.django_db
+def test_token_introspect_deleted_user_yields_null_display_name(
+    api_client, regular_user, user_api_key
+):
+    """Token belongs to a now-deleted user — display_name must be null, not a 500.
+
+    The API key is owned by ``regular_user`` (surviving fixture user) so that
+    ``JwtOrApiKeyAuthentication`` can still resolve a valid owner and grant
+    access.  The token itself is issued for a separate throwaway user who is
+    then deleted, which is the scenario under test.
+    """
+    raw_key, _key_obj = user_api_key  # key owned by regular_user (not deleted)
+
+    # Create a separate user whose deletion is the scenario under test.
+    throwaway_user = get_user_model().objects.create_user(
+        email="throwaway@example.com",
+        password="ThrowawayPass123!",
+    )
+    access = str(RefreshToken.for_user(throwaway_user).access_token)
+
+    # Delete the token-subject user after issuing the token.
+    throwaway_user.delete()
+
+    r = api_client.post(
+        reverse("token_introspect"),
+        data={"token": access},
+        format="json",
+        HTTP_X_API_KEY=raw_key,
+    )
+    assert r.status_code == 200, r.content
+    body = r.json()
+    assert body["active"] is True
+    assert body["display_name"] is None
+
+
+@pytest.mark.django_db
+def test_token_introspect_inactive_token_has_no_display_name(api_client, user_api_key):
+    """Inactive (expired/invalid) token must not include display_name."""
+    raw_key, _key_obj = user_api_key
+
+    r = api_client.post(
+        reverse("token_introspect"),
+        data={"token": "not.a.real.token"},
+        format="json",
+        HTTP_X_API_KEY=raw_key,
+    )
+    assert r.status_code == 200, r.content
+    body = r.json()
+    assert body["active"] is False
+    assert "display_name" not in body

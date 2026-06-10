@@ -1,4 +1,5 @@
 from drf_spectacular.utils import extend_schema, OpenApiResponse
+from django.contrib.auth import get_user_model
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -163,12 +164,17 @@ class TokenIntrospectView(APIView):
         except TokenError:
             return Response({"active": False}, status=status.HTTP_200_OK)
 
+        user_id = access.get("user_id")
+        user = get_user_model().objects.filter(id=user_id).first()
+        display_name = user.display_name if user is not None else None
+
         return Response(
             {
                 "active": True,
-                "user_id": access.get("user_id"),
+                "user_id": user_id,
                 "email": access.get("email"),
                 "scopes": access.get("scopes", []),
+                "display_name": display_name,
             },
             status=status.HTTP_200_OK,
         )
