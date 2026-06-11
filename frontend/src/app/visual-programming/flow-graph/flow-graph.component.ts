@@ -98,6 +98,15 @@ import { FlowModel } from '../core/models/flow.model';
 import { GraphNoteModel, NodeModel, ProjectNodeModel, StartNodeModel } from '../core/models/node.model';
 import { CreateNodeRequest } from '../core/models/node-creation.types';
 import { CustomPortId } from '../core/models/port.model';
+import {
+    FlowOp,
+    OpAddConnection,
+    OpAddNode,
+    OpDeleteNode,
+    OpMoveNode,
+    OpRemoveConnection,
+    OpUpdateNodeData,
+} from '../core/models/undo-redo-op.model';
 import { ClipboardService } from '../services/clipboard.service';
 import { CollabPresentationService } from '../services/collab-presentation.service';
 import { FlowService } from '../services/flow.service';
@@ -241,6 +250,8 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     private draggedNodeIds = new Set<string>();
     private draggingElements = new Set<string>();
     private isDragging = false;
+    /** Pre-drag positions captured at drag-start, used to build the inverse move op at drag-end. */
+    private readonly dragStartPositions = new Map<string, { x: number; y: number }>();
     protected readonly connectionRenderVersions = signal<Record<string, number>>({});
     private readonly hiddenConnectionIds = signal<Set<string>>(new Set<string>());
 
@@ -385,6 +396,15 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     public ngOnDestroy(): void {
         if (this.arrangeAnimationId !== null) {
             cancelAnimationFrame(this.arrangeAnimationId);
+            this.arrangeAnimationId = null;
+        }
+        // Abort any open batch whether the rAF was still running or the animation
+        // completed but the post-animation setTimeout(0) hasn't fired yet.
+        // _arrangingLock stays true for the entire arrange cycle (rAF + setTimeout),
+        // so it is the reliable sentinel for "batch is open".
+        if (this._arrangingLock) {
+            this.undoRedoService.abortBatch();
+            this._arrangingLock = false;
         }
         this.destroy$.next();
         this.destroy$.complete();
@@ -407,8 +427,6 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             console.warn('No new target or source provided for reassignment');
             return;
         }
-
-        this.undoRedoService.stateChanged();
 
         const existingConnection = this.flowService.connections().find((conn) => conn.id === event.connectionId);
 
@@ -436,15 +454,25 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             newTargetPortId as CustomPortId
         );
 
+        // Record as a batch: remove old + add new (single undoable gesture).
+        this.undoRedoService.beginBatch();
+        this.undoRedoService.recordOp({
+            kind: 'remove_connection',
+            connection: existingConnection,
+        } satisfies OpRemoveConnection);
         this.flowService.removeConnection(event.connectionId);
+        this.undoRedoService.recordOp({
+            kind: 'add_connection',
+            connection: updatedConnection,
+        } satisfies OpAddConnection);
         this.flowService.addConnection(updatedConnection);
+        this.undoRedoService.endBatch();
 
         this.toastService.success('Connection reassigned successfully', 3000, 'bottom-right');
     }
 
     public onConnectionAdded(event: FCreateConnectionEvent): void {
         this.hasUnarrangedChanges.set(true);
-        this.undoRedoService.stateChanged();
 
         const { fOutputId, fInputId } = event;
 
@@ -484,6 +512,10 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             pair.targetPortId as CustomPortId
         );
 
+        this.undoRedoService.recordOp({
+            kind: 'add_connection',
+            connection: newConnection,
+        } satisfies OpAddConnection);
         this.flowService.addConnection(newConnection);
 
         const nodes = this.flowService.nodes();
@@ -536,10 +568,12 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             ? snapPointToGrid(this.toFlowPosition(this.mouseCursorPosition))
             : { x: 0, y: 0 };
 
-        this.undoRedoService.stateChanged();
         const { newNodes, newConnections } = this.clipboardService.paste(pastePosition);
         const placedNodes: NodeModel[] = [];
         const existingBeforePaste = this.flowService.nodes().filter((n) => !newNodes.some((p) => p.id === n.id));
+
+        // Batch the entire paste as a single undoable gesture.
+        this.undoRedoService.beginBatch();
 
         for (const node of newNodes) {
             const safePosition = findNearestFreePosition(snapPointToGrid(node.position), getCollisionBounds(node), [
@@ -548,9 +582,22 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             ]);
 
             const updatedNode = { ...node, position: safePosition };
+            this.undoRedoService.recordOp({
+                kind: 'add_node',
+                node: updatedNode,
+            } satisfies OpAddNode);
             this.flowService.updateNode(updatedNode);
             placedNodes.push(updatedNode);
         }
+
+        for (const conn of newConnections) {
+            this.undoRedoService.recordOp({
+                kind: 'add_connection',
+                connection: conn,
+            } satisfies OpAddConnection);
+        }
+
+        this.undoRedoService.endBatch();
 
         const newNodeIds = newNodes.map((node) => node.id);
         const newConnectionIds = newConnections.map((conn) => conn.id);
@@ -565,8 +612,13 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             return;
         }
 
+        const batch = this.undoRedoService.popUndo();
+        if (!batch) {
+            return;
+        }
+
         this.hasUnarrangedChanges.set(true);
-        this.undoRedoService.onUndo();
+        this.replayOps(batch.inverse);
     }
 
     public onRedo(): void {
@@ -574,8 +626,13 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             return;
         }
 
+        const batch = this.undoRedoService.popRedo();
+        if (!batch) {
+            return;
+        }
+
         this.hasUnarrangedChanges.set(true);
-        this.undoRedoService.onRedo();
+        this.replayOps(batch.forward);
     }
 
     public onDelete(): void {
@@ -683,7 +740,6 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
 
     public onAddNodeFromContextMenu(event: CreateNodeRequest): void {
         this.hasUnarrangedChanges.set(true);
-        this.undoRedoService.stateChanged();
         this.showContextMenu.set(false);
 
         if (event.type === NodeType.END && this.flowService.hasEndNode()) {
@@ -699,6 +755,11 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             PointExtensions.initialize(this.contextMenuPosition().x, this.contextMenuPosition().y)
         );
         const newNode = this.nodeFactory.createNode(event.type, { ...event.overrides, position });
+
+        this.undoRedoService.recordOp({
+            kind: 'add_node',
+            node: newNode,
+        } satisfies OpAddNode);
         this.flowService.addNode(newNode);
 
         if (!this.applyingRemote) {
@@ -859,8 +920,6 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     }
 
     public onNodeSizeChanged(event: { width: number; height: number }, node: NodeModel): void {
-        this.undoRedoService.stateChanged();
-
         const updatedNode = {
             ...node,
             size: {
@@ -869,22 +928,36 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             },
         };
 
+        this.undoRedoService.recordOp({
+            kind: 'update_node_data',
+            previousNode: node,
+            updatedNode,
+        } satisfies OpUpdateNodeData);
+
         this.flowService.updateNode(updatedNode);
     }
 
     public onDragStarted(event: FDragStartedEvent): void {
         this.isDragging = true;
         this.draggingElements.clear();
+        // Capture pre-drag positions so we can build the inverse move op at drag end.
+        this.dragStartPositions.clear();
 
         const dragData = event.data as FDragNodeStartEventData | undefined;
         if (dragData?.fNodeIds) {
+            const nodes = this.flowService.nodes();
             dragData.fNodeIds.forEach((id: string) => {
                 this.draggingElements.add(id);
                 this.locallyDraggingNodeIds.add(id);
+                const node = nodes.find((n) => n.id === id);
+                if (node) {
+                    this.dragStartPositions.set(id, { x: node.position.x, y: node.position.y });
+                }
             });
         }
 
-        this.undoRedoService.stateChanged();
+        // Begin a batch so the entire multi-node drag is one undo entry.
+        this.undoRedoService.beginBatch();
     }
 
     private rerouteSegmentConnections(): void {
@@ -1035,6 +1108,28 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             }
         }
 
+        // Record a move op for each dragged node (from pre-drag position to final position).
+        // Uses captured dragStartPositions and current post-snap positions.
+        const currentNodes = this.flowService.nodes();
+        for (const id of this.draggedNodeIds) {
+            const from = this.dragStartPositions.get(id);
+            const current = currentNodes.find((n) => n.id === id);
+            if (!from || !current) continue;
+            // Only record if the position actually changed.
+            if (from.x !== current.position.x || from.y !== current.position.y) {
+                this.undoRedoService.recordOp({
+                    kind: 'move_node',
+                    nodeId: id,
+                    fromPosition: from,
+                    toPosition: { x: current.position.x, y: current.position.y },
+                } satisfies OpMoveNode);
+            }
+        }
+        this.dragStartPositions.clear();
+
+        // End the drag batch started in onDragStarted.
+        this.undoRedoService.endBatch();
+
         this.draggedNodeIds.clear();
 
         // Release drag lock after the final ops are sent so inbound self-echoes
@@ -1060,10 +1155,6 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     public onNodePositionChanged(newPos: IPoint, node: NodeModel): void {
         this.hasUnarrangedChanges.set(true);
         this.draggedNodeIds.add(node.id);
-
-        if (!this.isDragging || !this.draggingElements.has(node.id)) {
-            this.undoRedoService.stateChanged();
-        }
 
         const snappedX = this.snapToGrid(newPos.x);
         const snappedY = this.snapToGrid(newPos.y);
@@ -1458,8 +1549,8 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             return;
         }
 
-        this.undoRedoService.stateChanged();
-
+        // Begin a batch for the entire auto-arrange gesture.
+        this.undoRedoService.beginBatch();
         const startPositions = new Map(nodes.map((n) => [n.id, { ...n.position }]));
 
         // Pre-identify non-user-adjusted backward connections for per-frame arc updates.
@@ -1554,6 +1645,23 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
                     }
                     this.cd.detectChanges();
                     this.fFlowComponent?.redraw();
+
+                    // Record one move op per node that actually moved, then close the batch.
+                    const arrangeEndNodes = this.flowService.nodes();
+                    for (const node of arrangeEndNodes) {
+                        const from = startPositions.get(node.id);
+                        if (!from) continue;
+                        if (from.x !== node.position.x || from.y !== node.position.y) {
+                            this.undoRedoService.recordOp({
+                                kind: 'move_node',
+                                nodeId: node.id,
+                                fromPosition: from,
+                                toPosition: { x: node.position.x, y: node.position.y },
+                            } satisfies OpMoveNode);
+                        }
+                    }
+                    this.undoRedoService.endBatch();
+
                     this.hasUnarrangedChanges.set(false);
                     this._arrangingLock = false;
                     this.isArranging.set(false);
@@ -1680,44 +1788,42 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             return;
         }
 
-        this.undoRedoService.stateChanged();
-
         const nodeIdsToDelete = selections.fNodeIds.filter((nodeId) => {
             const node = this.flowService.nodes().find((n) => n.id === nodeId);
             return node && node.type !== NodeType.START;
         });
 
+        // Snapshot current state BEFORE deletion to compute outbound ops.
+        const currentNodes = this.flowService.nodes();
+        const currentConnections = this.flowService.connections();
+        const nodeIdsToDeleteSet = new Set(nodeIdsToDelete);
+
+        // Detect EDGE auto-deletes: connections being removed whose target is an EDGE node.
+        const autoDeletedEdgeNodeIds = new Set<string>();
+        for (const conn of currentConnections) {
+            const connId = selections.fConnectionIds.includes(conn.id) ? conn.id : null;
+            if (!connId) continue;
+            const targetNode = currentNodes.find((n) => n.id === conn.targetNodeId);
+            if (targetNode?.type === NodeType.EDGE) {
+                autoDeletedEdgeNodeIds.add(targetNode.id);
+                nodeIdsToDeleteSet.add(targetNode.id);
+            }
+        }
+
+        // Connections to remove (explicitly selected + orphaned by node deletes).
+        const connectionIdsToRemove = new Set<string>();
+        for (const connId of selections.fConnectionIds) {
+            connectionIdsToRemove.add(connId);
+        }
+        for (const conn of currentConnections) {
+            if (nodeIdsToDeleteSet.has(conn.sourceNodeId) || nodeIdsToDeleteSet.has(conn.targetNodeId)) {
+                connectionIdsToRemove.add(conn.id);
+            }
+        }
+
         if (!this.applyingRemote) {
-            // Snapshot current state BEFORE deletion to compute outbound ops.
-            const currentNodes = this.flowService.nodes();
-            const currentConnections = this.flowService.connections();
-            const nodeIdsToDeleteSet = new Set(nodeIdsToDelete);
-
-            // Detect EDGE auto-deletes: connections being removed whose target is an EDGE node.
-            const autoDeletedEdgeNodeIds = new Set<string>();
-            for (const conn of currentConnections) {
-                const connId = selections.fConnectionIds.includes(conn.id) ? conn.id : null;
-                if (!connId) continue;
-                const targetNode = currentNodes.find((n) => n.id === conn.targetNodeId);
-                if (targetNode?.type === NodeType.EDGE) {
-                    autoDeletedEdgeNodeIds.add(targetNode.id);
-                    nodeIdsToDeleteSet.add(targetNode.id);
-                }
-            }
-
-            // Connections to emit removes for (explicitly selected + orphaned by node deletes).
-            const connectionIdsToEmit = new Set<string>();
-            for (const connId of selections.fConnectionIds) {
-                connectionIdsToEmit.add(connId);
-            }
-            for (const conn of currentConnections) {
-                if (nodeIdsToDeleteSet.has(conn.sourceNodeId) || nodeIdsToDeleteSet.has(conn.targetNodeId)) {
-                    connectionIdsToEmit.add(conn.id);
-                }
-            }
-
             // Emit connection_removed for each connection being deleted.
-            for (const connId of connectionIdsToEmit) {
+            for (const connId of connectionIdsToRemove) {
                 this.collaborationPresenceService.sendConnectionRemove({ connection_id: connId });
             }
 
@@ -1730,10 +1836,166 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             }
         }
 
+        // Record undo ops BEFORE mutation (capture current objects).
+        if (!this.undoRedoService.replaying) {
+            this.undoRedoService.beginBatch();
+
+            // Record connection-remove ops for explicitly selected connections
+            // that are NOT covered by a node-delete (to avoid double-recording).
+            for (const connId of selections.fConnectionIds) {
+                const conn = currentConnections.find((c) => c.id === connId);
+                if (conn) {
+                    this.undoRedoService.recordOp({
+                        kind: 'remove_connection',
+                        connection: conn,
+                    } satisfies OpRemoveConnection);
+                }
+            }
+
+            // Record delete_node ops (each carries the orphaned connections so undo can re-add them).
+            for (const nodeId of nodeIdsToDeleteSet) {
+                const node = currentNodes.find((n) => n.id === nodeId);
+                if (!node) continue;
+
+                const orphanedConnections = currentConnections.filter(
+                    (c) =>
+                        (c.sourceNodeId === nodeId || c.targetNodeId === nodeId) &&
+                        !selections.fConnectionIds.includes(c.id)
+                );
+
+                this.undoRedoService.recordOp({
+                    kind: 'delete_node',
+                    node,
+                    removedConnections: orphanedConnections,
+                } satisfies OpDeleteNode);
+            }
+
+            this.undoRedoService.endBatch();
+        }
+
         this.flowService.deleteSelections({
             fNodeIds: nodeIdsToDelete,
             fConnectionIds: selections.fConnectionIds,
         });
+    }
+
+    /**
+     * Executes a sequence of ops through the normal local mutation + broadcast path.
+     * Used by onUndo() and onRedo().
+     *
+     * The `replaying` flag is set for the duration so recording sites skip creating
+     * new undo entries. The WS self-echo guard (`applyingRemote` = false) ensures
+     * the broadcast IS emitted — the echo will arrive with origin === selfMemberId
+     * and be dropped at the normal guard, so no double-apply occurs.
+     *
+     * SYNC NOTE: replay is fully synchronous — this is a plain for-loop over
+     * executeSingleOp, which calls only synchronous FlowService signal mutators and
+     * CollaborationPresenceService.send* methods (no await, no Promise, no setTimeout,
+     * no rAF). JS single-threadedness therefore guarantees that no inbound WebSocket
+     * message handler can interleave mid-replay while `replaying` is true, so no
+     * guard in applyRemoteNodeMove/applyRemoteAddNode/etc. is needed.
+     */
+    private replayOps(ops: readonly FlowOp[]): void {
+        this.undoRedoService.replaying = true;
+        try {
+            for (const op of ops) {
+                this.executeSingleOp(op);
+            }
+        } finally {
+            this.undoRedoService.replaying = false;
+        }
+
+        this.rerouteSegmentConnections();
+        this.cd.detectChanges();
+        this.fFlowComponent?.redraw();
+    }
+
+    /**
+     * Executes a single FlowOp locally and broadcasts to collaborators.
+     * Called exclusively from replayOps().
+     */
+    private executeSingleOp(op: FlowOp): void {
+        switch (op.kind) {
+            case 'add_node': {
+                this.flowService.addNode(op.node);
+                this.collaborationPresenceService.sendNodeAdd({
+                    node_key: this.nodeKey(op.node),
+                    node: op.node,
+                });
+                break;
+            }
+
+            case 'delete_node': {
+                const nodeKey = this.nodeKey(op.node);
+                // Determine orphaned connections from the service's current state
+                // (peers may have added connections to this node concurrently — additive LWW).
+                const allConnectionsForNode = this.flowService
+                    .connections()
+                    .filter((c) => c.sourceNodeId === op.node.id || c.targetNodeId === op.node.id);
+
+                for (const conn of allConnectionsForNode) {
+                    this.collaborationPresenceService.sendConnectionRemove({ connection_id: conn.id });
+                }
+                this.collaborationPresenceService.sendNodeDelete({ node_key: nodeKey });
+
+                this.flowService.deleteSelections({
+                    fNodeIds: [op.node.id],
+                    fConnectionIds: [],
+                });
+                break;
+            }
+
+            case 'move_node': {
+                const node = this.flowService.nodes().find((n) => n.id === op.nodeId);
+                if (!node) break;
+
+                const updated = { ...node, position: op.toPosition };
+                this.flowService.updateNode(updated);
+
+                if (typeof updated.backendId === 'number') {
+                    this.collaborationPresenceService.sendNodeMove({
+                        node_id: updated.backendId,
+                        x: op.toPosition.x,
+                        y: op.toPosition.y,
+                    });
+                }
+                break;
+            }
+
+            case 'update_node_data': {
+                this.flowService.updateNode(op.updatedNode);
+
+                if (typeof op.updatedNode.backendId === 'number') {
+                    this.collaborationPresenceService.sendNodeDataUpdate({
+                        node_id: op.updatedNode.backendId,
+                        node_name: op.updatedNode.node_name,
+                        data: op.updatedNode.data as Record<string, unknown>,
+                    });
+                }
+                break;
+            }
+
+            case 'add_connection': {
+                this.flowService.addConnection(op.connection);
+                const sourceNode = this.flowService.nodes().find((n) => n.id === op.connection.sourceNodeId);
+                const targetNode = this.flowService.nodes().find((n) => n.id === op.connection.targetNodeId);
+                this.collaborationPresenceService.sendConnectionAdd({
+                    connection_id: op.connection.id,
+                    source_node_key: sourceNode ? this.nodeKey(sourceNode) : op.connection.sourceNodeId,
+                    target_node_key: targetNode ? this.nodeKey(targetNode) : op.connection.targetNodeId,
+                    source_port_id: op.connection.sourcePortId,
+                    target_port_id: op.connection.targetPortId,
+                    connection: op.connection,
+                });
+                break;
+            }
+
+            case 'remove_connection': {
+                this.collaborationPresenceService.sendConnectionRemove({ connection_id: op.connection.id });
+                this.flowService.removeConnection(op.connection.id);
+                break;
+            }
+        }
     }
 
     private resolveTableOverlaps(node: NodeModel): string[] {
