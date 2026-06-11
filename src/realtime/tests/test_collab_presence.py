@@ -112,12 +112,24 @@ def _assert_presence_msg(msg: dict, *, flow_id: int, count: int) -> None:
     Pins the exact envelope shape so stray keys are caught immediately.
     The EST-3 ``participants`` field is additive — assert its type but not its
     exact contents here (dedicated AC6/AC7/AC8 tests cover that).
+    The EST-7 ``designated_member_id`` field is additive — assert its presence
+    but not its exact value here (dedicated FC2/FC3 tests cover that).
     """
-    assert set(msg.keys()) == {"type", "flow_id", "count", "participants"}
+    assert set(msg.keys()) == {
+        "type",
+        "flow_id",
+        "count",
+        "participants",
+        "designated_member_id",
+    }
     assert msg["type"] == "presence"
     assert msg["flow_id"] == flow_id
     assert msg["count"] == count
     assert isinstance(msg["participants"], list)
+    # designated_member_id is str | None
+    assert msg["designated_member_id"] is None or isinstance(
+        msg["designated_member_id"], str
+    )
 
 
 # ---------------------------------------------------------------------------

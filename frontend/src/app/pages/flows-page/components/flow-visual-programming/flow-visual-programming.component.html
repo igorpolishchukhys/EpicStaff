@@ -7,6 +7,7 @@
         [isSaving]="isSaving()"
         [isRunning]="isRunning()"
         [hasUnsavedChanges]="hasUnsavedChangesSignal()"
+        [savedLabel]="savedLabel()"
         (save)="onHeaderSave()"
         (saveVersion)="onSaveVersion()"
         (viewVersionHistory)="onViewVersionHistory()"
@@ -15,6 +16,7 @@
         (getCurl)="handleGetCurl()"
         (connectChat)="connectToEpicChat()"
         (flowEdited)="onFlowEdited($event)"
+        (exportFlow)="handleExportFlow()"
     ></app-flow-header>
 
     <div class="body">

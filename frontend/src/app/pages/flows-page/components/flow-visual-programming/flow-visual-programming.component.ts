@@ -25,6 +25,7 @@ import {
     filter,
     finalize,
     forkJoin,
+    interval,
     map,
     Observable,
     of,
@@ -34,6 +35,7 @@ import {
 } from 'rxjs';
 
 import { CanComponentDeactivate } from '../../../../core/guards/unsaved-changes.guard';
+import { ImportExportService } from '../../../../core/services/import-export.service';
 import { EpicChatService } from '../../../../features/epic-chat/epic-chat.service';
 import { FlowSessionsListComponent } from '../../../../features/flows/components/flow-sessions-dialog/flow-sessions-list.component';
 import { RestoreWarningsDialogComponent } from '../../../../features/flows/components/restore-warnings-dialog/restore-warnings-dialog.component';
@@ -59,6 +61,7 @@ import {
     ConnectionAddedMessage,
     ConnectionRemovedMessage,
     DocumentStateMessage,
+    FlushRequestedMessage,
     NodeAddedMessage,
     NodeDeletedMessage,
 } from '../../../../services/collaboration/collab-message.model';
@@ -68,6 +71,7 @@ import { ToastService } from '../../../../services/notifications/toast.service';
 import { AppSvgIconComponent } from '../../../../shared/components/app-svg-icon/app-svg-icon.component';
 import { SpinnerComponent } from '../../../../shared/components/spinner/spinner.component';
 import { UnsavedChangesDialogService } from '../../../../shared/components/unsaved-changes-dialog/unsaved-changes-dialog.service';
+import { downloadBlob } from '../../../../shared/utils/download-blob.util';
 import { NodeType } from '../../../../visual-programming/core/enums/node-type';
 import { FlowModel } from '../../../../visual-programming/core/models/flow.model';
 import { ScheduleTriggerNodeModel } from '../../../../visual-programming/core/models/node.model';
@@ -139,6 +143,41 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
 
     public isSaving = signal(false);
     public isRunning = signal(false);
+    /** Timestamp (ms) of the most recent successful save. Null until the first save. */
+    private readonly lastSavedAt = signal<number | null>(null);
+    /**
+     * Incremented every 30 s by a `setInterval` started in the constructor.
+     * Reading it inside `savedLabel` makes the computed re-evaluate on each tick
+     * so the relative-time portion stays current without requiring a signal write
+     * to `lastSavedAt` or `isSaving`.
+     */
+    private readonly nowTick = signal<number>(0);
+    /**
+     * Human-readable save indicator exposed to the header.
+     * - 'Syncing…'         while isSaving() is true
+     * - 'Saved · just now' when last saved < 60 s ago
+     * - 'Saved · Xm ago'   otherwise (based on minutes)
+     * Note: get-relative-time.util.ts returns "0 m ago" sub-minute and has a
+     * month-label bug, so the < 60 s and relative-minute cases are computed here.
+     */
+    public readonly savedLabel = computed<string>(() => {
+        if (this.isSaving()) {
+            return 'Syncing…';
+        }
+        const savedAt = this.lastSavedAt();
+        if (savedAt === null) {
+            return '';
+        }
+        // Reading nowTick() registers it as a reactive dependency so this computed
+        // re-runs every 30 s even when lastSavedAt and isSaving have not changed.
+        void this.nowTick();
+        const elapsedMs = Date.now() - savedAt;
+        if (elapsedMs < 60_000) {
+            return 'Saved · just now';
+        }
+        const minutes = Math.floor(elapsedMs / 60_000);
+        return `Saved · ${minutes}m ago`;
+    });
     public restoreWarnings = signal<RestoreWarning[]>([]);
     /** Buffers the latest document_state message received before the flow finishes loading. */
     private readonly pendingDocumentState = signal<DocumentStateMessage | null>(null);
@@ -167,6 +206,7 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
 
     private readonly collaborationPresenceService = inject(CollaborationPresenceService);
     private readonly profileService = inject(ProfileService);
+    private readonly importExportService = inject(ImportExportService);
 
     constructor(
         private readonly route: ActivatedRoute,
@@ -194,6 +234,12 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
         this.routeQueryParamMap = toSignal(this.route.queryParamMap, {
             initialValue: this.route.snapshot.queryParamMap,
         });
+
+        // Drive the relative-time portion of savedLabel by advancing nowTick every 30 s.
+        // takeUntilDestroyed clears the subscription automatically when the component is destroyed.
+        interval(30_000)
+            .pipe(takeUntilDestroyed(this.destroyRef))
+            .subscribe(() => this.nowTick.update((v) => v + 1));
 
         effect(() => {
             this.initialNodeId = this.routeQueryParamMap().get('nodeId');
@@ -321,6 +367,22 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
                 }
                 this.flowGraphComponent?.applyRemoteRemoveConnection(msg);
             });
+
+        // Collaboration: server-triggered flush — only the designated client acts on it.
+        // Belt-and-braces: the server only sends flush_requested to the designated member,
+        // but we re-check isDesignated() locally in case a race made both clients act.
+        this.collaborationPresenceService.flushRequested$
+            .pipe(takeUntilDestroyed(this.destroyRef))
+            .subscribe((msg: FlushRequestedMessage) => {
+                const currentId = this.graphState()?.id;
+                if (msg.flow_id !== currentId) {
+                    return;
+                }
+                if (!this.collaborationPresenceService.isDesignated()) {
+                    return;
+                }
+                this.saveCurrentState().pipe(takeUntilDestroyed(this.destroyRef)).subscribe();
+            });
     }
 
     public ngOnInit(): void {
@@ -405,6 +467,7 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
                     }
                 }
                 this.savedFlowState.set(cloneFlowState(patchedFlow));
+                this.lastSavedAt.set(Date.now());
                 this.sidePanelService.notifyGraphSaved();
                 if (showSuccessToast) {
                     this.toastService.success('Graph saved successfully');
@@ -557,6 +620,32 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
         });
     }
 
+    /**
+     * In-editor export: flushes unsaved changes first so the exported file reflects
+     * the current canvas state, then triggers the file download.
+     */
+    public handleExportFlow(): void {
+        if (!this.graph?.id) return;
+
+        const graphId = this.graph.id;
+        const graphName = this.graph.name ?? `flow-${graphId}`;
+
+        this.saveCurrentState()
+            .pipe(
+                switchMap(() => this.importExportService.exportFlow(graphId.toString())),
+                takeUntilDestroyed(this.destroyRef)
+            )
+            .subscribe({
+                next: (blob: Blob) => {
+                    downloadBlob(blob, `${graphName}_export_${Date.now()}.json`);
+                    this.toastService.success(`Flow "${graphName}" exported successfully`);
+                },
+                error: () => {
+                    this.toastService.error(`Failed to export flow "${graphName}"`);
+                },
+            });
+    }
+
     public handleGetCurl(): void {
         const flowUuid = this.graph?.uuid;
         const startNodeInitialState = this.flowService.startNodeInitialState();
@@ -606,6 +695,11 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
     @HostListener('window:beforeunload', ['$event'])
     public handleBeforeUnload(event: BeforeUnloadEvent): string | void {
         if (this.hasUnsavedChanges()) {
+            // Show the browser's native "Leave site?" dialog. The async save attempted in
+            // ngOnDestroy is best-effort only: browsers aggressively cancel in-flight XHR/
+            // fetch requests on page unload, so it may not complete. The reliable durability
+            // paths are the periodic server-triggered flush (flush_requested) and the Angular
+            // canDeactivate guard (which awaits the save before allowing navigation).
             event.preventDefault();
             return (event.returnValue = '');
         }
@@ -726,6 +820,13 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
     public ngOnDestroy(): void {
         this.flowUnsavedStateService.unregister();
         this.runSessionSSEService.stopStream();
+        // Leave-flush: if the user navigates away while there are unsaved changes, attempt
+        // to persist them before the socket disconnects (empty-room durability).
+        // takeUntilDestroyed has already completed by this lifecycle hook, so we subscribe
+        // directly — the request completes independently of the component lifetime.
+        if (this.hasUnsavedChanges()) {
+            this.saveCurrentState().subscribe();
+        }
         this.collaborationPresenceService.disconnect();
     }
 

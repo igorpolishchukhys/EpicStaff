@@ -8,6 +8,8 @@ export interface PresenceMessage {
     flow_id: number;
     count: number;
     participants?: PresenceParticipant[];
+    /** The member_id of the oldest-joined participant (designated flush client). Optional — absent on older servers. */
+    designated_member_id?: string | null;
 }
 
 export interface NodeMovedMessage {
@@ -180,6 +182,17 @@ export interface LockStateMessage {
 export interface HeartbeatAckMessage {
     type: 'heartbeat_ack';
     flow_id: number;
+}
+
+/**
+ * Server → designated client only. Requests that the designated member run the
+ * existing FE save pipeline for the given flow. Inbound-only — the client sends
+ * nothing back.
+ */
+export interface FlushRequestedMessage {
+    type: 'flush_requested';
+    flow_id: number;
+    reason: string;
 }
 
 export interface NodeDataUpdatedMessage {
@@ -364,6 +377,17 @@ export function isHeartbeatAckMessage(value: unknown): value is HeartbeatAckMess
         value !== null &&
         record['type'] === 'heartbeat_ack' &&
         typeof record['flow_id'] === 'number'
+    );
+}
+
+export function isFlushRequestedMessage(value: unknown): value is FlushRequestedMessage {
+    const record = value as Record<string, unknown>;
+    return (
+        typeof value === 'object' &&
+        value !== null &&
+        record['type'] === 'flush_requested' &&
+        typeof record['flow_id'] === 'number' &&
+        typeof record['reason'] === 'string'
     );
 }
 

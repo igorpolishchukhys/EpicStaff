@@ -77,3 +77,30 @@ class CollabSocketRegistry:
                         callback(ws)
                 if not surviving:
                     del self._sockets[flow_id]
+
+    async def send_to(self, websocket: WebSocket, payload: dict) -> None:
+        """Serialise ``payload`` to JSON and send to a single ``websocket``.
+
+        If the send fails the socket is treated as dead: it is removed from
+        every flow bucket it belongs to and all ``on_drop`` callbacks fire,
+        mirroring the behaviour of ``broadcast_json``.
+        """
+        message = json.dumps(payload)
+        try:
+            await websocket.send_text(message)
+        except Exception:
+            logger.warning("collab registry: send_to failed, dropping dead socket")
+            # Find which flow(s) this socket belongs to and drop it.
+            dead_flows = [
+                flow_id
+                for flow_id, sockets in self._sockets.items()
+                if websocket in sockets
+            ]
+            for flow_id in dead_flows:
+                flow_sockets = self._sockets.get(flow_id)
+                if flow_sockets is not None:
+                    flow_sockets.discard(websocket)
+                    if not flow_sockets:
+                        del self._sockets[flow_id]
+            for callback in self._on_drop_callbacks:
+                callback(websocket)

@@ -12,10 +12,12 @@ import {
     CursorMovedMessage,
     CursorMoveOp,
     DocumentStateMessage,
+    FlushRequestedMessage,
     isConnectionAddedMessage,
     isConnectionRemovedMessage,
     isCursorMovedMessage,
     isDocumentStateMessage,
+    isFlushRequestedMessage,
     isHeartbeatAckMessage,
     isLockDeniedMessage,
     isLockGrantedMessage,
@@ -71,9 +73,12 @@ export class CollaborationPresenceService {
     readonly participants = signal<PresenceParticipant[]>([]);
     readonly connectionState = signal<CollabConnectionState>('disconnected');
     readonly selfMemberId = signal<string | null>(null);
+    /** True when this client is the designated flush member (oldest-joined participant). */
+    readonly isDesignated = signal<boolean>(false);
 
     // --- Observables ---
     readonly remoteNodeMove$: Observable<NodeMovedMessage>;
+    readonly flushRequested$: Observable<FlushRequestedMessage>;
     readonly documentState$: Observable<DocumentStateMessage>;
     readonly remoteCursor$: Observable<CursorMovedMessage>;
     readonly remoteSelection$: Observable<SelectionChangedMessage>;
@@ -92,6 +97,7 @@ export class CollaborationPresenceService {
     private readonly authService = inject(AuthService);
     private readonly configService = inject(ConfigService);
 
+    private readonly flushRequestedSubject = new Subject<FlushRequestedMessage>();
     private readonly remoteNodeMoveSubject = new Subject<NodeMovedMessage>();
     private readonly documentStateSubject = new Subject<DocumentStateMessage>();
     private readonly remoteCursorSubject = new Subject<CursorMovedMessage>();
@@ -115,6 +121,7 @@ export class CollaborationPresenceService {
     private lastHeartbeatAckAt: number | null = null;
 
     constructor() {
+        this.flushRequested$ = this.flushRequestedSubject.asObservable();
         this.remoteNodeMove$ = this.remoteNodeMoveSubject.asObservable();
         this.documentState$ = this.documentStateSubject.asObservable();
         this.remoteCursor$ = this.remoteCursorSubject.asObservable();
@@ -153,6 +160,7 @@ export class CollaborationPresenceService {
         this.participants.set([]);
         this.connectionState.set('disconnected');
         this.selfMemberId.set(null);
+        this.isDesignated.set(false);
         this.connectedFlowId = null;
     }
 
@@ -386,6 +394,15 @@ export class CollaborationPresenceService {
         if (isPresenceMessage(parsed)) {
             this.participantCount.set(parsed.count);
             this.participants.set(parsed.participants ?? []);
+            // Update designated-client status whenever presence changes.
+            // designated_member_id is optional — absent on older servers; treat as non-designated.
+            const designatedId = parsed.designated_member_id ?? null;
+            this.isDesignated.set(designatedId !== null && designatedId === this.selfMemberId());
+            return;
+        }
+
+        if (isFlushRequestedMessage(parsed)) {
+            this.flushRequestedSubject.next(parsed);
             return;
         }
 
