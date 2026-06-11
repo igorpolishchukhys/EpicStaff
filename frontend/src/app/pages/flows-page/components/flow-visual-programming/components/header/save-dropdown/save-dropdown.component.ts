@@ -14,4 +14,5 @@ export class SaveDropdownComponent {
     @Output() save = new EventEmitter<void>();
     @Output() saveVersion = new EventEmitter<void>();
     @Output() viewVersionHistory = new EventEmitter<void>();
+    @Output() exportFlow = new EventEmitter<void>();
 }

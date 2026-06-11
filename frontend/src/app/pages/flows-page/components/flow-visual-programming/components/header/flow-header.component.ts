@@ -39,6 +39,8 @@ export class FlowHeaderComponent {
     @Input() isSaving = false;
     @Input() isRunning = false;
     @Input() hasUnsavedChanges = false;
+    /** Save-state label: 'Syncing…', 'Saved · just now', 'Saved · Xm ago', or ''. */
+    @Input() savedLabel = '';
     @Output() save = new EventEmitter<void>();
     @Output() back = new EventEmitter<void>();
     @Output() viewSessions = new EventEmitter<void>();
@@ -48,6 +50,7 @@ export class FlowHeaderComponent {
     @Output() flowEdited = new EventEmitter<GraphDto>();
     @Output() saveVersion = new EventEmitter<void>();
     @Output() viewVersionHistory = new EventEmitter<void>();
+    @Output() exportFlow = new EventEmitter<void>();
 
     public isSaveDropdownOpen = signal(false);
 

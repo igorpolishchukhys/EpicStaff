@@ -47,6 +47,7 @@ from application.live_document_service import LiveDocumentService
 from application.cursor_service import CursorService
 from application.lock_service import LockService
 from application.heartbeat_monitor import HeartbeatMonitor
+from application.flush_coordinator import FlushCoordinator
 from domain.models.collab_messages import (
     NodeMovedIn,
     CursorMovedIn,
@@ -109,6 +110,12 @@ live_document_service = LiveDocumentService(
 cursor_service = CursorService(registry=collab_registry)
 lock_service = LockService(registry=collab_registry)
 heartbeat_monitor = HeartbeatMonitor()
+flush_coordinator = FlushCoordinator(
+    presence_service=presence_service,
+    registry=collab_registry,
+    live_document_repository=live_document_repository,
+)
+presence_service.set_flush_coordinator(flush_coordinator)
 
 
 def _release_locks_for_dropped_socket(websocket: WebSocket) -> None:

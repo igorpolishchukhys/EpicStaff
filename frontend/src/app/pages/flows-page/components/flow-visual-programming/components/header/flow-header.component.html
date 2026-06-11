@@ -143,8 +143,12 @@
                 (save)="onSave(); closeSaveDropdown()"
                 (saveVersion)="saveVersion.emit(); closeSaveDropdown()"
                 (viewVersionHistory)="viewVersionHistory.emit(); closeSaveDropdown()"
+                (exportFlow)="exportFlow.emit(); closeSaveDropdown()"
             />
         </ng-template>
+        @if (savedLabel) {
+            <span class="save-indicator">{{ savedLabel }}</span>
+        }
         <button
             class="run-button"
             [appCollapseOnOverflow]="true"

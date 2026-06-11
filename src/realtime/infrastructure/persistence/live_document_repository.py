@@ -29,8 +29,9 @@ class LiveDocumentRepository:
         Tombstone keys are prefixed: ``node:<node_key>`` and
         ``conn:<connection_id>`` to keep a single hash per flow.
 
-    None of these hashes are cleared on last-client-exit — GC is a later
-    slice (mirrors the existing positions behaviour).
+    None of these hashes are cleared on last-client-exit by default.
+    Call ``clear_flow`` when the last client leaves to reclaim Redis memory;
+    this is triggered by ``FlushCoordinator.on_room_empty``.
     """
 
     def __init__(self, redis_service: RedisService) -> None:
@@ -270,3 +271,23 @@ class LiveDocumentRepository:
     async def get_tombstones(self, flow_id: int) -> dict[str, str]:
         """Return all tombstone entries as ``{tombstone_key: "1"}``."""
         return await self._redis.aioredis_client.hgetall(self._tombstones_key(flow_id))
+
+    # ------------------------------------------------------------------
+    # GC
+    # ------------------------------------------------------------------
+
+    async def clear_flow(self, flow_id: int) -> None:
+        """Delete all four per-flow Redis keys.
+
+        Called by ``FlushCoordinator.on_room_empty`` when the last editor
+        leaves so that stale document state does not accumulate indefinitely.
+        Uses a single DEL command for atomicity.
+        """
+        keys = [
+            self._positions_key(flow_id),
+            self._nodes_key(flow_id),
+            self._connections_key(flow_id),
+            self._tombstones_key(flow_id),
+        ]
+        await self._redis.aioredis_client.delete(*keys)
+        logger.info("live_doc GC: cleared all keys for flow={}", flow_id)
