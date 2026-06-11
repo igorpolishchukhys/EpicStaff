@@ -329,7 +329,11 @@
             <i class="ti ti-settings"></i>
         </button>
     </div>
-    <app-flow-action-panel (undoRedoPerformed)="hasUnarrangedChanges.set(true)"></app-flow-action-panel>
+    <app-flow-action-panel
+        (undoRequested)="onUndo()"
+        (redoRequested)="onRedo()"
+        (undoRedoPerformed)="hasUnarrangedChanges.set(true)"
+    ></app-flow-action-panel>
 
     @if (showContextMenu()) {
         <app-flow-graph-context-menu

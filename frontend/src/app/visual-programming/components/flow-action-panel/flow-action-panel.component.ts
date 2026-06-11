@@ -4,6 +4,15 @@ import { Component, inject, output } from '@angular/core';
 import { AppSvgIconComponent } from '../../../shared/components/app-svg-icon/app-svg-icon.component';
 import { UndoRedoService } from '../../services/undo-redo.service';
 
+/**
+ * Undo/redo toolbar panel.
+ *
+ * EST-10: The panel no longer calls undoRedoService.onUndo/onRedo directly.
+ * Instead it emits `undoRequested` / `redoRequested` outputs so
+ * FlowGraphComponent can execute the replay (which must also broadcast to
+ * collaborators). `undoRedoPerformed` is kept for backward compat — the host
+ * template binds `(undoRedoPerformed)="hasUnarrangedChanges.set(true)"`.
+ */
 @Component({
     selector: 'app-flow-action-panel',
     standalone: true,
@@ -12,6 +21,14 @@ import { UndoRedoService } from '../../services/undo-redo.service';
     styleUrls: ['./flow-action-panel.component.scss'],
 })
 export class FlowActionPanelComponent {
+    /** Emitted when the undo button is clicked. FlowGraphComponent handles replay. */
+    readonly undoRequested = output<void>();
+    /** Emitted when the redo button is clicked. FlowGraphComponent handles replay. */
+    readonly redoRequested = output<void>();
+    /**
+     * Kept for backward compat — host template binds
+     * `(undoRedoPerformed)="hasUnarrangedChanges.set(true)"`.
+     */
     readonly undoRedoPerformed = output<void>();
 
     readonly actionIcons = [
@@ -33,11 +50,11 @@ export class FlowActionPanelComponent {
     handleAction(actionType: string): void {
         switch (actionType) {
             case 'undo':
-                this.undoRedoService.onUndo();
+                this.undoRequested.emit();
                 this.undoRedoPerformed.emit();
                 break;
             case 'redo':
-                this.undoRedoService.onRedo();
+                this.redoRequested.emit();
                 this.undoRedoPerformed.emit();
                 break;
             default:
