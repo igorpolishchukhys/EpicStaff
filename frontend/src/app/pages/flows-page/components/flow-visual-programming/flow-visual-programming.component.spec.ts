@@ -13,6 +13,7 @@ import { FlowsApiService } from '../../../../features/flows/services/flows-api.s
 import { FlowsStorageService } from '../../../../features/flows/services/flows-storage.service';
 import { RunGraphService } from '../../../../features/flows/services/run-graph-session.service';
 import { RunSessionSSEService } from '../../../../pages/running-graph/services/graph-session-sse.service';
+import { PermissionsService } from '../../../../services/auth/permissions.service';
 import { ProfileService } from '../../../../services/auth/profile.service';
 import { FlushRequestedMessage } from '../../../../services/collaboration/collab-message.model';
 import { CollaborationPresenceService } from '../../../../services/collaboration/collaboration-presence.service';
@@ -78,6 +79,7 @@ class CollaborationPresenceServiceStub {
     connectionState = signal('disconnected');
     selfMemberId = signal<string | null>(null);
     isDesignated = signal(false);
+    isViewer = signal(false);
     flushRequested$ = flushRequestedSubject.asObservable();
     remoteNodeMove$ = EMPTY;
     documentState$ = EMPTY;
@@ -147,6 +149,10 @@ class ImportExportServiceStub {
     exportFlow = jasmine.createSpy().and.returnValue(of(new Blob(['{}'], { type: 'application/json' })));
 }
 
+class PermissionsServiceStub {
+    can = jasmine.createSpy('can').and.returnValue(false);
+}
+
 class CdkDialogStub {
     open = jasmine.createSpy('open').and.returnValue({ closed: EMPTY });
 }
@@ -164,6 +170,7 @@ class OverlayStub {
 describe('FlowVisualProgrammingComponent', () => {
     let component: FlowVisualProgrammingComponent;
     let collabService: CollaborationPresenceServiceStub;
+    let permissionsService: PermissionsServiceStub;
     let importExportService: ImportExportServiceStub;
     let toastService: ToastServiceStub;
 
@@ -179,6 +186,7 @@ describe('FlowVisualProgrammingComponent', () => {
                 { provide: ToastService, useClass: ToastServiceStub },
                 { provide: RunGraphService, useClass: RunGraphServiceStub },
                 { provide: CollaborationPresenceService, useClass: CollaborationPresenceServiceStub },
+                { provide: PermissionsService, useClass: PermissionsServiceStub },
                 { provide: ProfileService, useClass: ProfileServiceStub },
                 { provide: ConfigService, useClass: ConfigServiceStub },
                 { provide: EpicChatService, useClass: EpicChatServiceStub },
@@ -197,6 +205,7 @@ describe('FlowVisualProgrammingComponent', () => {
 
         component = TestBed.createComponent(FlowVisualProgrammingComponent).componentInstance;
         collabService = TestBed.inject(CollaborationPresenceService) as unknown as CollaborationPresenceServiceStub;
+        permissionsService = TestBed.inject(PermissionsService) as unknown as PermissionsServiceStub;
         importExportService = TestBed.inject(ImportExportService) as unknown as ImportExportServiceStub;
         toastService = TestBed.inject(ToastService) as unknown as ToastServiceStub;
     });
@@ -309,6 +318,12 @@ describe('FlowVisualProgrammingComponent', () => {
     // -------------------------------------------------------------------------
 
     describe('handleExportFlow', () => {
+        beforeEach(() => {
+            // Export tests require RBAC to permit editing so the method does not bail
+            // at the canEdit() guard. Viewer status defaults to false (non-viewer).
+            permissionsService.can.and.returnValue(true);
+        });
+
         it('calls saveCurrentState before exportFlow', () => {
             // Set a minimal graph so the method does not bail out early.
             (component as unknown as { graphState: ReturnType<typeof signal> }).graphState.set({
@@ -359,6 +374,48 @@ describe('FlowVisualProgrammingComponent', () => {
             component.handleExportFlow();
 
             expect(toastService.error).toHaveBeenCalledWith(jasmine.stringContaining('Failed to export'));
+        });
+
+        it('shows a warning toast and does not export when the session is viewer-only', () => {
+            (component as unknown as { graphState: ReturnType<typeof signal> }).graphState.set({
+                id: 7,
+                name: 'my-flow',
+            });
+            // RBAC allows editing but server says viewer — canEdit() must be false.
+            collabService.isViewer.set(true);
+
+            component.handleExportFlow();
+
+            expect(toastService.warning).toHaveBeenCalledWith(jasmine.stringContaining('read-only'));
+            expect(importExportService.exportFlow).not.toHaveBeenCalled();
+        });
+    });
+
+    // -------------------------------------------------------------------------
+    // canEdit — composed RBAC + collab-viewer gate
+    // -------------------------------------------------------------------------
+
+    describe('canEdit composed gate', () => {
+        it('returns false when RBAC says editor but server marked the session as a viewer', () => {
+            // RBAC permits editing, but the collab server overrides with viewer status.
+            permissionsService.can.and.returnValue(true);
+            collabService.isViewer.set(true);
+
+            expect(component.canEdit()).toBe(false);
+        });
+
+        it('returns true when RBAC says editor and the server has not marked the session as a viewer', () => {
+            permissionsService.can.and.returnValue(true);
+            collabService.isViewer.set(false);
+
+            expect(component.canEdit()).toBe(true);
+        });
+
+        it('returns false when RBAC denies editing regardless of viewer status', () => {
+            permissionsService.can.and.returnValue(false);
+            collabService.isViewer.set(false);
+
+            expect(component.canEdit()).toBe(false);
         });
     });
 });

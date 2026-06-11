@@ -2,6 +2,7 @@ import { NgStyle } from '@angular/common';
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
 
 import { PresenceParticipant } from '../../../../../../services/collaboration/collab-message.model';
+import { AppSvgIconComponent } from '../../../../../../shared/components/app-svg-icon/app-svg-icon.component';
 import { getParticipantColor } from './collab-colors';
 
 const MAX_VISIBLE = 5;
@@ -12,12 +13,13 @@ export interface AvatarViewModel {
     color: string;
     label: string;
     isCurrentUser: boolean;
+    isViewer: boolean;
 }
 
 @Component({
     selector: 'app-presence-avatar-stack',
     standalone: true,
-    imports: [NgStyle],
+    imports: [NgStyle, AppSvgIconComponent],
     templateUrl: './presence-avatar-stack.component.html',
     styleUrl: './presence-avatar-stack.component.scss',
     changeDetection: ChangeDetectionStrategy.OnPush,
@@ -70,15 +72,17 @@ export class PresenceAvatarStackComponent {
 
     private buildViewModel(participant: PresenceParticipant, currentUserId: number | null): AvatarViewModel {
         const isCurrentUser = participant.user_id === currentUserId;
+        const isViewer = participant.is_viewer === true;
         const displayName = participant.display_name;
         const initials = this.deriveInitials(displayName);
+        const viewerSuffix = isViewer ? ' (viewer)' : '';
         const label = displayName
             ? isCurrentUser
-                ? `${displayName} (you)`
-                : displayName
+                ? `${displayName} (you)${viewerSuffix}`
+                : `${displayName}${viewerSuffix}`
             : isCurrentUser
-              ? '(you)'
-              : `User ${participant.user_id}`;
+              ? `(you)${viewerSuffix}`
+              : `User ${participant.user_id}${viewerSuffix}`;
 
         return {
             userId: participant.user_id,
@@ -86,6 +90,7 @@ export class PresenceAvatarStackComponent {
             color: getParticipantColor(participant.user_id),
             label,
             isCurrentUser,
+            isViewer,
         };
     }
 

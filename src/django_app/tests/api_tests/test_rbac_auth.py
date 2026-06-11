@@ -29,7 +29,8 @@ from rest_framework_simplejwt.token_blacklist.models import (
 )
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from tables.models.rbac_models import PasswordResetToken
+from tables.models.rbac_models import OrganizationUser, PasswordResetToken, Role
+from tables.models.rbac_models.rbac_enums import Permission, ResourceType
 from tables.services.rbac.sse_ticket_service import SseTicketService
 
 LOCMEM_EMAIL = "django.core.mail.backends.locmem.EmailBackend"
@@ -1195,3 +1196,223 @@ def test_token_introspect_inactive_token_has_no_display_name(api_client, user_ap
     body = r.json()
     assert body["active"] is False
     assert "display_name" not in body
+
+
+# ---------------- EST-11: introspect can_edit ----------------
+
+
+@pytest.fixture
+def viewer_role(db):
+    """Built-in Viewer role — must definitively lack FLOWS/UPDATE.
+
+    The assertion here is not paranoia: if the seed migration is broken or
+    someone changes the Viewer permissions bitmask, the introspect tests would
+    silently pass with the wrong semantics (can_edit=True for a viewer).
+    Failing loudly here is the right behaviour.
+    """
+    role = Role.objects.get(name="Viewer", is_built_in=True, org__isnull=True)
+    from tables.models.rbac_models import RolePermission
+
+    perm_row = RolePermission.objects.filter(
+        role=role, resource_type=ResourceType.FLOWS
+    ).first()
+    flows_bitmask = perm_row.permissions if perm_row else 0
+    assert not (flows_bitmask & Permission.UPDATE), (
+        f"Viewer role must NOT have FLOWS/UPDATE, "
+        f"but bitmask is {flows_bitmask:#x}. "
+        "Check migration 0171_seed_builtin_roles."
+    )
+    return role
+
+
+@pytest.fixture
+def member_role(db):
+    """Built-in Member role — must definitively have FLOWS/UPDATE.
+
+    Same rationale as viewer_role: a wrong bitmask would make the editor
+    fixtures grant the wrong access level without any test failing.
+    """
+    role = Role.objects.get(name="Member", is_built_in=True, org__isnull=True)
+    from tables.models.rbac_models import RolePermission
+
+    perm_row = RolePermission.objects.filter(
+        role=role, resource_type=ResourceType.FLOWS
+    ).first()
+    flows_bitmask = perm_row.permissions if perm_row else 0
+    assert flows_bitmask & Permission.UPDATE, (
+        f"Member role must have FLOWS/UPDATE, "
+        f"but bitmask is {flows_bitmask:#x}. "
+        "Check migration 0171_seed_builtin_roles."
+    )
+    return role
+
+
+@pytest.fixture
+def introspect_org(db):
+    from tables.models.rbac_models import Organization
+
+    return Organization.objects.create(name="IntrospectOrg")
+
+
+@pytest.fixture
+def other_org(db):
+    from tables.models.rbac_models import Organization
+
+    return Organization.objects.create(name="OtherOrg")
+
+
+@pytest.fixture
+def introspect_flow(db):
+    from tables.models.graph_models import Graph
+
+    return Graph.objects.create(name="introspect-flow")
+
+
+@pytest.fixture
+def flow_in_org(db, introspect_flow, introspect_org):
+    """Link the test flow to the test org via GraphOrganization."""
+    from tables.models.graph_models import GraphOrganization
+
+    GraphOrganization.objects.create(graph=introspect_flow, organization=introspect_org)
+    return introspect_flow
+
+
+@pytest.fixture
+def editor_user(db, introspect_org, member_role):
+    """A user with flows:update in introspect_org (Member role has UPDATE)."""
+    user = get_user_model().objects.create_user(
+        email="editor@introspect.com",
+        password="EditorPass123!",
+    )
+    OrganizationUser.objects.create(user=user, org=introspect_org, role=member_role)
+    return user
+
+
+@pytest.fixture
+def viewer_user(db, introspect_org, viewer_role):
+    """A user with flows:read only in introspect_org (Viewer role, no UPDATE)."""
+    user = get_user_model().objects.create_user(
+        email="viewer@introspect.com",
+        password="ViewerPass123!",
+    )
+    OrganizationUser.objects.create(user=user, org=introspect_org, role=viewer_role)
+    return user
+
+
+def _access_token(user) -> str:
+    from rest_framework_simplejwt.tokens import AccessToken as _AT
+
+    return str(_AT.for_user(user))
+
+
+@pytest.mark.django_db
+def test_introspect_editor_can_edit_is_true(
+    api_client, user_api_key, flow_in_org, introspect_org, editor_user
+):
+    """A user with flows:update in the org → can_edit is True."""
+    raw_key, _ = user_api_key
+    token = _access_token(editor_user)
+
+    r = api_client.post(
+        reverse("token_introspect"),
+        data={
+            "token": token,
+            "flow_id": flow_in_org.id,
+            "org_id": introspect_org.id,
+        },
+        format="json",
+        HTTP_X_API_KEY=raw_key,
+    )
+    assert r.status_code == 200, r.content
+    body = r.json()
+    assert body["active"] is True
+    assert body["can_edit"] is True
+
+
+@pytest.mark.django_db
+def test_introspect_viewer_can_edit_is_false(
+    api_client, user_api_key, flow_in_org, introspect_org, viewer_user
+):
+    """A user with flows:read-only in the org → can_edit is False."""
+    raw_key, _ = user_api_key
+    token = _access_token(viewer_user)
+
+    r = api_client.post(
+        reverse("token_introspect"),
+        data={
+            "token": token,
+            "flow_id": flow_in_org.id,
+            "org_id": introspect_org.id,
+        },
+        format="json",
+        HTTP_X_API_KEY=raw_key,
+    )
+    assert r.status_code == 200, r.content
+    body = r.json()
+    assert body["active"] is True
+    assert body["can_edit"] is False
+
+
+@pytest.mark.django_db
+def test_introspect_flow_not_in_org_can_edit_is_false(
+    api_client, user_api_key, introspect_flow, other_org, editor_user, introspect_org
+):
+    """Flow is NOT linked to other_org → can_edit is False (bypass-attempt guard)."""
+    raw_key, _ = user_api_key
+    token = _access_token(editor_user)
+
+    # other_org has no GraphOrganization row for introspect_flow.
+    r = api_client.post(
+        reverse("token_introspect"),
+        data={
+            "token": token,
+            "flow_id": introspect_flow.id,
+            "org_id": other_org.id,
+        },
+        format="json",
+        HTTP_X_API_KEY=raw_key,
+    )
+    assert r.status_code == 200, r.content
+    body = r.json()
+    assert body["active"] is True
+    assert body["can_edit"] is False
+
+
+@pytest.mark.django_db
+def test_introspect_without_flow_org_context_no_can_edit(
+    api_client, user_api_key, editor_user
+):
+    """When flow_id/org_id are absent → response has no can_edit field (back-compat)."""
+    raw_key, _ = user_api_key
+    token = _access_token(editor_user)
+
+    r = api_client.post(
+        reverse("token_introspect"),
+        data={"token": token},
+        format="json",
+        HTTP_X_API_KEY=raw_key,
+    )
+    assert r.status_code == 200, r.content
+    body = r.json()
+    assert body["active"] is True
+    assert "can_edit" not in body
+
+
+@pytest.mark.django_db
+def test_introspect_with_only_flow_id_no_can_edit(
+    api_client, user_api_key, flow_in_org, editor_user
+):
+    """Only flow_id without org_id → can_edit is absent (both required)."""
+    raw_key, _ = user_api_key
+    token = _access_token(editor_user)
+
+    r = api_client.post(
+        reverse("token_introspect"),
+        data={"token": token, "flow_id": flow_in_org.id},
+        format="json",
+        HTTP_X_API_KEY=raw_key,
+    )
+    assert r.status_code == 200, r.content
+    body = r.json()
+    assert body["active"] is True
+    assert "can_edit" not in body

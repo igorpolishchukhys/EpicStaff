@@ -67,16 +67,16 @@ import { FlowNodeVariablesOverlayComponent } from './flow-node-variables-overlay
     },
 })
 export class FlowBaseNodeComponent {
+    // 1. Inputs / Outputs
     @Input({ required: true }) node!: NodeModel;
-    @Output() fNodeSizeChange = new EventEmitter<{
-        width: number;
-        height: number;
-    }>();
-    @Output() editClicked = new EventEmitter<NodeModel>();
-    @Output() deleteClicked = new EventEmitter<NodeModel>();
-    public isExpanded = signal(false);
-    public isToggleDisabled = signal(false);
     @Input() showVariables: boolean = false;
+
+    /**
+     * When true, the current user is a viewer (no 'flows:update' permission).
+     * The delete button is hidden and edit/delete clicks are suppressed so the
+     * node emits no edit or delete events. Drag is blocked at the canvas level.
+     */
+    readonly viewerMode = input<boolean>(false);
 
     /**
      * When a remote collaborator has selected this node, pass `{color, displayName}`
@@ -92,9 +92,19 @@ export class FlowBaseNodeComponent {
      */
     readonly remoteLock = input<{ color: string; displayName: string } | null>(null);
 
+    @Output() fNodeSizeChange = new EventEmitter<{
+        width: number;
+        height: number;
+    }>();
+    @Output() editClicked = new EventEmitter<NodeModel>();
+    @Output() deleteClicked = new EventEmitter<NodeModel>();
     @Output() projectExpandToggled = new EventEmitter<ProjectNodeModel>();
     @Output() portMouseenter = new EventEmitter<void>();
     @Output() portMouseleave = new EventEmitter<void>();
+
+    // 3. Signals & Computed
+    public isExpanded = signal(false);
+    public isToggleDisabled = signal(false);
 
     public NodeType = NodeType;
     public readonly eResizeHandleType = EFResizeHandleType;
@@ -126,6 +136,9 @@ export class FlowBaseNodeComponent {
     public onDeleteClick(event: MouseEvent): void {
         event.preventDefault();
         event.stopPropagation();
+        if (this.viewerMode()) {
+            return;
+        }
         this.deleteClicked.emit(this.node);
     }
 
@@ -133,6 +146,9 @@ export class FlowBaseNodeComponent {
         if (event) {
             event.preventDefault();
             event.stopPropagation();
+        }
+        if (this.viewerMode()) {
+            return;
         }
         if (this.isBlockedSubgraph) {
             return;

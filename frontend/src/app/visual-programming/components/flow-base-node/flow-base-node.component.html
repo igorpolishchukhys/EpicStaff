@@ -11,27 +11,27 @@
     class="actions"
     (mousedown)="$event.stopPropagation()"
 >
-    <!-- Edit Button for Note -->
+    <!-- Edit Button for Note — hidden for viewers -->
     <div
-        *ngIf="node.type === NodeType.NOTE"
+        *ngIf="node.type === NodeType.NOTE && !viewerMode()"
         class="action-button edit-button"
         title="Edit Note"
         (click)="onEditClick($event)"
     >
         <app-svg-icon icon="edit"></app-svg-icon>
     </div>
-    <!-- Ungroup Icon -->
+    <!-- Ungroup Icon — hidden for viewers -->
     <div
-        *ngIf="node.type === NodeType.PROJECT"
+        *ngIf="node.type === NodeType.PROJECT && !viewerMode()"
         class="action-button ungroup-button"
         title="Expand Project"
         (click)="onExpandProjectClick()"
     >
         <app-svg-icon icon="edit"></app-svg-icon>
     </div>
-    <!-- Delete Button -->
+    <!-- Delete Button — hidden for viewers -->
     <div
-        *ngIf="node.type !== NodeType.START"
+        *ngIf="node.type !== NodeType.START && !viewerMode()"
         class="action-button delete-button"
         title="Delete node"
         (click)="onDeleteClick($event)"

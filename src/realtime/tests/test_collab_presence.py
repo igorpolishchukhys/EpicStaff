@@ -405,9 +405,12 @@ class TestParticipantsIdentity:
                 # Alice joins → count 1, participants = [Alice].
                 msg_alice_join = json.loads(ws_alice.receive_text())
                 assert msg_alice_join["count"] == 1
-                assert msg_alice_join["participants"] == [
-                    {"user_id": 10, "display_name": "Alice"}
-                ]
+                # EST-11: participants carry additional keys (e.g. is_viewer);
+                # check the required fields only to stay additive-field safe.
+                assert len(msg_alice_join["participants"]) == 1
+                p = msg_alice_join["participants"][0]
+                assert p["user_id"] == 10
+                assert p["display_name"] == "Alice"
 
                 with client.websocket_connect(
                     "/realtime/collab/?flow_id=300&token=token-bob"
@@ -487,9 +490,12 @@ class TestParticipantsIdentity:
                 leave_msg = json.loads(ws_alice.receive_text())
                 assert leave_msg["count"] == 1
                 # Only Alice's identity remains.
-                assert leave_msg["participants"] == [
-                    {"user_id": 10, "display_name": "Alice"}
-                ]
+                # EST-11: participants carry additional keys (e.g. is_viewer);
+                # check the required fields only to stay additive-field safe.
+                assert len(leave_msg["participants"]) == 1
+                p = leave_msg["participants"][0]
+                assert p["user_id"] == 10
+                assert p["display_name"] == "Alice"
 
     def test_display_name_null_is_preserved_in_participants(self):
         """display_name=None is preserved as null in the participants list."""
@@ -508,4 +514,9 @@ class TestParticipantsIdentity:
             ) as ws:
                 msg = json.loads(ws.receive_text())
                 assert msg["count"] == 1
-                assert msg["participants"] == [{"user_id": 5, "display_name": None}]
+                # EST-11: participants carry additional keys (e.g. is_viewer);
+                # check the required fields only to stay additive-field safe.
+                assert len(msg["participants"]) == 1
+                p = msg["participants"][0]
+                assert p["user_id"] == 5
+                assert p["display_name"] is None

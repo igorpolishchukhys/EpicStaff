@@ -1,6 +1,8 @@
 import { computed, inject, Injectable, Signal, signal } from '@angular/core';
 import { Observable, Subject } from 'rxjs';
 
+import { PermissionsService } from '../../services/auth/permissions.service';
+import { CollaborationPresenceService } from '../../services/collaboration/collaboration-presence.service';
 import { NodeModel } from '../core/models/node.model';
 import { FlowService } from './flow.service';
 import { PanelLockService } from './panel-lock.service';
@@ -28,6 +30,8 @@ export class SidePanelService {
 
     private readonly flowService = inject(FlowService);
     private readonly panelLockService = inject(PanelLockService);
+    private readonly permissionsService = inject(PermissionsService);
+    private readonly collaborationPresenceService = inject(CollaborationPresenceService);
 
     public readonly selectedNode: Signal<NodeModel | null> = computed(() => {
         const selectedId = this.selectedNodeId();
@@ -51,6 +55,11 @@ export class SidePanelService {
      * Attempts to select a node and open its side panel.
      *
      * Lock rules:
+     *  - If the current user is a viewer — either org RBAC denies 'flows:update'
+     *    OR the collab server marked this session read-only (is_viewer=true) —
+     *    returns false immediately without opening the panel or acquiring any lock.
+     *    The caller may show a toast or take no action — opening is blocked by
+     *    either gate (fail-closed: both must pass).
      *  - If the target node has a backendId and another participant holds the lock,
      *    returns false without opening the panel (caller shows the denial toast).
      *  - If the same node is already selected, returns true immediately (idempotent).
@@ -58,6 +67,14 @@ export class SidePanelService {
      *    then select the new node and request its lock (if it has a backendId).
      */
     public trySelectNode(node: NodeModel): boolean {
+        // Viewer guard: block panel open and all lock acquisition.
+        // A user is an editor only if BOTH gates pass:
+        //   1. org RBAC allows 'flows:update'
+        //   2. the collab server did not mark this session as read-only
+        if (!this.permissionsService.can('flows', 'update') || this.collaborationPresenceService.isViewer()) {
+            return false;
+        }
+
         const currentId = this.selectedNodeIdSignal();
 
         if (currentId === node.id) {

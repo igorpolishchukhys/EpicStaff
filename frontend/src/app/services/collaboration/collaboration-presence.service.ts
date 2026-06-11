@@ -1,6 +1,7 @@
 import { inject, Injectable, signal } from '@angular/core';
 import { Observable, Subject } from 'rxjs';
 
+import { ActiveOrgService } from '../auth/active-org.service';
 import { AuthService } from '../auth/auth.service';
 import { ConfigService } from '../config/config.service';
 import {
@@ -28,6 +29,7 @@ import {
     isNodeLockedMessage,
     isNodeMovedMessage,
     isNodeUnlockedMessage,
+    isOpRejectedMessage,
     isPresenceMessage,
     isSelectionChangedMessage,
     isSelfIdentityMessage,
@@ -46,6 +48,7 @@ import {
     NodeMovedMessage,
     NodeMoveOp,
     NodeUnlockedMessage,
+    OpRejectedMessage,
     PresenceParticipant,
     SelectionChangedMessage,
     SelectionOp,
@@ -75,6 +78,12 @@ export class CollaborationPresenceService {
     readonly selfMemberId = signal<string | null>(null);
     /** True when this client is the designated flush member (oldest-joined participant). */
     readonly isDesignated = signal<boolean>(false);
+    /**
+     * True when the server resolved this connection as read-only (viewer).
+     * Set from the inbound `self` frame; reset to false on `disconnect()`.
+     * Viewers are prevented from sending mutating operations.
+     */
+    readonly isViewer = signal<boolean>(false);
 
     // --- Observables ---
     readonly remoteNodeMove$: Observable<NodeMovedMessage>;
@@ -92,10 +101,13 @@ export class CollaborationPresenceService {
     readonly remoteNodeDeleted$: Observable<NodeDeletedMessage>;
     readonly remoteConnectionAdded$: Observable<ConnectionAddedMessage>;
     readonly remoteConnectionRemoved$: Observable<ConnectionRemovedMessage>;
+    /** Emits when the server rejects an outbound op because this client is a viewer. Normally silent — a firing event indicates a UI-gate gap. */
+    readonly opRejected$: Observable<OpRejectedMessage>;
 
     // --- Private fields ---
     private readonly authService = inject(AuthService);
     private readonly configService = inject(ConfigService);
+    private readonly activeOrgService = inject(ActiveOrgService);
 
     private readonly flushRequestedSubject = new Subject<FlushRequestedMessage>();
     private readonly remoteNodeMoveSubject = new Subject<NodeMovedMessage>();
@@ -112,6 +124,7 @@ export class CollaborationPresenceService {
     private readonly remoteNodeDeletedSubject = new Subject<NodeDeletedMessage>();
     private readonly remoteConnectionAddedSubject = new Subject<ConnectionAddedMessage>();
     private readonly remoteConnectionRemovedSubject = new Subject<ConnectionRemovedMessage>();
+    private readonly opRejectedSubject = new Subject<OpRejectedMessage>();
 
     private socket: WebSocket | null = null;
     private connectedFlowId: number | null = null;
@@ -136,6 +149,7 @@ export class CollaborationPresenceService {
         this.remoteNodeDeleted$ = this.remoteNodeDeletedSubject.asObservable();
         this.remoteConnectionAdded$ = this.remoteConnectionAddedSubject.asObservable();
         this.remoteConnectionRemoved$ = this.remoteConnectionRemovedSubject.asObservable();
+        this.opRejected$ = this.opRejectedSubject.asObservable();
     }
 
     // --- Public methods ---
@@ -161,10 +175,14 @@ export class CollaborationPresenceService {
         this.connectionState.set('disconnected');
         this.selfMemberId.set(null);
         this.isDesignated.set(false);
+        this.isViewer.set(false);
         this.connectedFlowId = null;
     }
 
     sendNodeMove(operation: NodeMoveOp): void {
+        if (this.isViewer()) {
+            return;
+        }
         if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
             return;
         }
@@ -210,6 +228,9 @@ export class CollaborationPresenceService {
     }
 
     sendLockRequest(operation: LockRequestOp): void {
+        if (this.isViewer()) {
+            return;
+        }
         if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
             return;
         }
@@ -224,6 +245,9 @@ export class CollaborationPresenceService {
     }
 
     sendLockRelease(operation: LockReleaseOp): void {
+        if (this.isViewer()) {
+            return;
+        }
         if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
             return;
         }
@@ -238,6 +262,9 @@ export class CollaborationPresenceService {
     }
 
     sendNodeDataUpdate(operation: NodeDataUpdateOp): void {
+        if (this.isViewer()) {
+            return;
+        }
         if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
             return;
         }
@@ -254,6 +281,9 @@ export class CollaborationPresenceService {
     }
 
     sendNodeAdd(operation: NodeAddOp): void {
+        if (this.isViewer()) {
+            return;
+        }
         if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
             return;
         }
@@ -269,6 +299,9 @@ export class CollaborationPresenceService {
     }
 
     sendNodeDelete(operation: NodeDeleteOp): void {
+        if (this.isViewer()) {
+            return;
+        }
         if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
             return;
         }
@@ -283,6 +316,9 @@ export class CollaborationPresenceService {
     }
 
     sendConnectionAdd(operation: ConnectionAddOp): void {
+        if (this.isViewer()) {
+            return;
+        }
         if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
             return;
         }
@@ -302,6 +338,9 @@ export class CollaborationPresenceService {
     }
 
     sendConnectionRemove(operation: ConnectionRemoveOp): void {
+        if (this.isViewer()) {
+            return;
+        }
         if (this.connectionState() !== 'connected' || this.socket === null || this.connectedFlowId === null) {
             return;
         }
@@ -428,6 +467,17 @@ export class CollaborationPresenceService {
 
         if (isSelfIdentityMessage(parsed)) {
             this.selfMemberId.set(parsed.member_id);
+            this.isViewer.set(parsed.is_viewer === true);
+            return;
+        }
+
+        if (isOpRejectedMessage(parsed)) {
+            // This should be silent in normal operation — the UI gates all mutating ops
+            // before they reach the transport. A firing event means a gate is missing.
+            console.warn(
+                `[CollaborationPresenceService] op_rejected received for op="${parsed.op}" — viewer gate missing for this operation`
+            );
+            this.opRejectedSubject.next(parsed);
             return;
         }
 
@@ -570,6 +620,13 @@ export class CollaborationPresenceService {
         const wsBase = realtimeBase.replace(/^https:\/\//i, 'wss://').replace(/^http:\/\//i, 'ws://');
         const normalizedBase = wsBase.endsWith('/') ? wsBase : `${wsBase}/`;
 
-        return `${normalizedBase}collab/?flow_id=${flowId}&token=${encodeURIComponent(token)}`;
+        let url = `${normalizedBase}collab/?flow_id=${flowId}&token=${encodeURIComponent(token)}`;
+
+        const orgId = this.activeOrgService.activeOrgId();
+        if (orgId !== null) {
+            url += `&org_id=${orgId}`;
+        }
+
+        return url;
     }
 }

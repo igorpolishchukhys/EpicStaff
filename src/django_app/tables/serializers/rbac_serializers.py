@@ -42,6 +42,12 @@ class FirstSetupResponseSerializer(serializers.Serializer):
 
 class TokenIntrospectRequestSerializer(serializers.Serializer):
     token = serializers.CharField()
+    # Optional context fields.  When BOTH are present the response includes
+    # a ``can_edit`` boolean computed from the RBAC permission resolver.
+    # When either is absent the field is omitted so existing callers see no
+    # change to the response shape.
+    flow_id = serializers.IntegerField(required=False)
+    org_id = serializers.IntegerField(required=False)
 
 
 class TokenIntrospectResponseSerializer(serializers.Serializer):
@@ -50,6 +56,8 @@ class TokenIntrospectResponseSerializer(serializers.Serializer):
     email = serializers.EmailField(required=False)
     scopes = serializers.ListField(child=serializers.CharField(), required=False)
     display_name = serializers.CharField(allow_null=True, required=False)
+    # Present only when flow_id + org_id were supplied in the request.
+    can_edit = serializers.BooleanField(required=False)
 
 
 # ---- API-key validate ----

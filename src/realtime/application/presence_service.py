@@ -110,12 +110,17 @@ class PresenceService:
         websocket: WebSocket,
         user_id: int,
         display_name: str | None = None,
+        is_viewer: bool = False,
     ) -> str:
         """Register a new connection for flow_id.
 
         Returns the opaque member_id (uuid4 hex) assigned to this connection.
         Broadcasts the updated count and participant list to all connections
         on the flow.
+
+        ``is_viewer`` marks read-only participants (flows:read, not flows:update).
+        The flag is included in the ``presence`` broadcast and the ``self`` frame
+        so the frontend can reflect read-only status in the avatar stack.
         """
         member_id = uuid.uuid4().hex
 
@@ -124,7 +129,11 @@ class PresenceService:
         await self._repository.add_member(flow_id, member_id)
 
         self._registry.register(flow_id, websocket)
-        self._identity[websocket] = {"user_id": user_id, "display_name": display_name}
+        self._identity[websocket] = {
+            "user_id": user_id,
+            "display_name": display_name,
+            "is_viewer": is_viewer,
+        }
         self._member_socket[member_id] = websocket
 
         # Insertion-ordered join tracking.
