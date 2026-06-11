@@ -24,6 +24,7 @@ from tables.serializers.rbac_serializers import (
 from tables.services.rbac.auth_service import TokenPair
 from tables.services.rbac.auth_validation_service import AuthValidationService
 from tables.services.rbac.first_setup_service import FirstSetupService
+from tables.services.rbac.introspect_service import resolve_can_edit
 from tables.services.rbac.password_recovery_service import PasswordRecoveryService
 from tables.services.rbac.rbac_exceptions import InvalidRefreshTokenError
 from tables.services.rbac.reset_user_service import ResetUserService
@@ -158,6 +159,8 @@ class TokenIntrospectView(APIView):
         serializer = TokenIntrospectRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         token = serializer.validated_data["token"]
+        flow_id = serializer.validated_data.get("flow_id")
+        org_id = serializer.validated_data.get("org_id")
 
         try:
             access = AccessToken(token)
@@ -168,16 +171,22 @@ class TokenIntrospectView(APIView):
         user = get_user_model().objects.filter(id=user_id).first()
         display_name = user.display_name if user is not None else None
 
-        return Response(
-            {
-                "active": True,
-                "user_id": user_id,
-                "email": access.get("email"),
-                "scopes": access.get("scopes", []),
-                "display_name": display_name,
-            },
-            status=status.HTTP_200_OK,
-        )
+        payload: dict = {
+            "active": True,
+            "user_id": user_id,
+            "email": access.get("email"),
+            "scopes": access.get("scopes", []),
+            "display_name": display_name,
+        }
+
+        # When the caller supplies both flow_id and org_id, compute whether
+        # the token owner may edit that flow within that org.  Omitting
+        # either context parameter leaves `can_edit` absent — existing callers
+        # are unaffected.
+        if flow_id is not None and org_id is not None and user is not None:
+            payload["can_edit"] = resolve_can_edit(user, flow_id, org_id)
+
+        return Response(payload, status=status.HTTP_200_OK)
 
 
 class ApiKeyValidateView(APIView):

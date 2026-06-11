@@ -34,13 +34,32 @@ def validate_api_key() -> bool:
     return True
 
 
-def introspect_token(token: str) -> dict | None:
+def introspect_token(
+    token: str,
+    flow_id: int | None = None,
+    org_id: int | None = None,
+) -> dict | None:
+    """Introspect a JWT access token via Django.
+
+    When both ``flow_id`` and ``org_id`` are supplied they are forwarded to
+    the Django endpoint which adds a ``can_edit`` boolean to the response.
+    When either is absent the optional context is not sent and the response
+    is identical to the pre-EST-11 shape.
+
+    Returns the introspection dict on success, ``None`` on any failure.
+    """
     if not validate_api_key():
         return None
+
+    body: dict = {"token": token}
+    if flow_id is not None and org_id is not None:
+        body["flow_id"] = flow_id
+        body["org_id"] = org_id
+
     try:
         resp = requests.post(
             f"{settings.DJANGO_AUTH_URL}/api/auth/introspect/",
-            json={"token": token},
+            json=body,
             headers={"X-API-Key": settings.DJANGO_API_KEY},
             timeout=settings.DJANGO_AUTH_TIMEOUT,
         )
@@ -49,7 +68,7 @@ def introspect_token(token: str) -> dict | None:
         return None
 
     if resp.status_code != 200:
-        logger.warning(f"Token introspection failed with status {resp.status_code}")
+        logger.warning("Token introspection failed with status {}", resp.status_code)
         return None
 
     data = resp.json()

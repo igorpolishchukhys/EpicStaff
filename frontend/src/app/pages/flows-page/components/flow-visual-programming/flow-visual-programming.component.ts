@@ -56,6 +56,7 @@ import { FlowsStorageService } from '../../../../features/flows/services/flows-s
 import { RunGraphService } from '../../../../features/flows/services/run-graph-session.service';
 import { FlowMessagesPanelComponent } from '../../../../pages/running-graph/components/flow-messages-panel/flow-messages-panel.component';
 import { RunSessionSSEService } from '../../../../pages/running-graph/services/graph-session-sse.service';
+import { PermissionsService } from '../../../../services/auth/permissions.service';
 import { ProfileService } from '../../../../services/auth/profile.service';
 import {
     ConnectionAddedMessage,
@@ -203,8 +204,22 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
     public readonly presenceCount = computed(() => this.collaborationPresenceService.participantCount());
     public readonly presenceParticipants = computed(() => this.collaborationPresenceService.participants());
     public readonly currentUserId = computed<number | null>(() => this.profileService.currentUserSignal()?.id ?? null);
+    /**
+     * True only when BOTH conditions hold:
+     *   1. The user has the org-level 'flows update' RBAC permission.
+     *   2. The collab server has NOT marked this session as a viewer for this flow.
+     *
+     * Fail-closed: before the `self` frame arrives, `isViewer()` is false so RBAC
+     * governs alone. Once the server marks the session a viewer, this gate locks
+     * regardless of RBAC, preventing save/export from reaching a transport that
+     * would reject the operation anyway.
+     */
+    public readonly canEdit = computed<boolean>(
+        () => this.permissionsService.can('flows', 'update') && !this.collaborationPresenceService.isViewer()
+    );
 
     private readonly collaborationPresenceService = inject(CollaborationPresenceService);
+    private readonly permissionsService = inject(PermissionsService);
     private readonly profileService = inject(ProfileService);
     private readonly importExportService = inject(ImportExportService);
 
@@ -426,6 +441,7 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
 
     private saveFlowState(flowState: FlowModel, showSuccessToast: boolean): Observable<void> {
         if (!this.graph?.id) return EMPTY;
+        if (!this.canEdit()) return EMPTY;
 
         const previous = this.loadedFlowState();
         const nodeDiff = getNodeDiff(previous, flowState);
@@ -565,6 +581,10 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
     }
 
     private saveGraphForRun(): Observable<void> {
+        // Viewers cannot persist changes — skip the pre-run flush and run against the
+        // last-saved graph state. The canvas may show local diffs, but the execution
+        // will be based on whatever is persisted on the server.
+        if (!this.canEdit()) return of(void 0);
         if (!this.hasUnsavedChanges()) return of(void 0);
         if (this.isSaving()) return EMPTY;
 
@@ -623,9 +643,15 @@ export class FlowVisualProgrammingComponent implements OnInit, OnDestroy, CanCom
     /**
      * In-editor export: flushes unsaved changes first so the exported file reflects
      * the current canvas state, then triggers the file download.
+     * Viewers cannot export because the pre-export flush would persist changes they
+     * are not permitted to make.
      */
     public handleExportFlow(): void {
         if (!this.graph?.id) return;
+        if (!this.canEdit()) {
+            this.toastService.warning('You have read-only access to this flow and cannot export it.');
+            return;
+        }
 
         const graphId = this.graph.id;
         const graphName = this.graph.name ?? `flow-${graphId}`;

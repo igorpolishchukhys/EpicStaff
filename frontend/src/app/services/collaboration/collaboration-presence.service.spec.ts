@@ -1,8 +1,10 @@
+import { signal } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 
+import { ActiveOrgService } from '../auth/active-org.service';
 import { AuthService } from '../auth/auth.service';
 import { ConfigService } from '../config/config.service';
-import { FlushRequestedMessage } from './collab-message.model';
+import { FlushRequestedMessage, OpRejectedMessage } from './collab-message.model';
 import { CollaborationPresenceService } from './collaboration-presence.service';
 
 /** Minimal stub that satisfies the parts of AuthService used by the WS builder. */
@@ -17,6 +19,11 @@ class ConfigServiceStub {
     readonly realtimeApiUrl = 'http://localhost:8001';
 }
 
+/** Minimal stub for ActiveOrgService. */
+class ActiveOrgServiceStub {
+    readonly activeOrgId = signal<number | null>(null);
+}
+
 describe('CollaborationPresenceService — flush & designation', () => {
     let service: CollaborationPresenceService;
 
@@ -26,6 +33,7 @@ describe('CollaborationPresenceService — flush & designation', () => {
                 CollaborationPresenceService,
                 { provide: AuthService, useClass: AuthServiceStub },
                 { provide: ConfigService, useClass: ConfigServiceStub },
+                { provide: ActiveOrgService, useClass: ActiveOrgServiceStub },
             ],
         });
         service = TestBed.inject(CollaborationPresenceService);
@@ -204,5 +212,198 @@ describe('CollaborationPresenceService — flush & designation', () => {
 
             expect(service.isDesignated()).toBeFalse();
         });
+    });
+});
+
+describe('CollaborationPresenceService — isViewer', () => {
+    let service: CollaborationPresenceService;
+
+    const simulateMessage = (svc: CollaborationPresenceService, data: unknown): void => {
+        (svc as unknown as { handleMessage(e: MessageEvent): void }).handleMessage(
+            new MessageEvent('message', { data: JSON.stringify(data) })
+        );
+    };
+
+    beforeEach(() => {
+        TestBed.configureTestingModule({
+            providers: [
+                CollaborationPresenceService,
+                { provide: AuthService, useClass: AuthServiceStub },
+                { provide: ConfigService, useClass: ConfigServiceStub },
+                { provide: ActiveOrgService, useClass: ActiveOrgServiceStub },
+            ],
+        });
+        service = TestBed.inject(CollaborationPresenceService);
+    });
+
+    it('starts as false', () => {
+        expect(service.isViewer()).toBeFalse();
+    });
+
+    it('becomes true when self frame carries is_viewer: true', () => {
+        simulateMessage(service, { type: 'self', flow_id: 1, member_id: 'mx', user_id: 1, is_viewer: true });
+        expect(service.isViewer()).toBeTrue();
+    });
+
+    it('remains false when self frame carries is_viewer: false', () => {
+        simulateMessage(service, { type: 'self', flow_id: 1, member_id: 'mx', user_id: 1, is_viewer: false });
+        expect(service.isViewer()).toBeFalse();
+    });
+
+    it('remains false when self frame omits is_viewer (older servers)', () => {
+        simulateMessage(service, { type: 'self', flow_id: 1, member_id: 'mx', user_id: 1 });
+        expect(service.isViewer()).toBeFalse();
+    });
+
+    it('resets to false on disconnect()', () => {
+        simulateMessage(service, { type: 'self', flow_id: 1, member_id: 'mx', user_id: 1, is_viewer: true });
+        expect(service.isViewer()).toBeTrue();
+
+        service.disconnect();
+
+        expect(service.isViewer()).toBeFalse();
+    });
+});
+
+describe('CollaborationPresenceService — mutating send* guards', () => {
+    let service: CollaborationPresenceService;
+
+    const simulateMessage = (svc: CollaborationPresenceService, data: unknown): void => {
+        (svc as unknown as { handleMessage(e: MessageEvent): void }).handleMessage(
+            new MessageEvent('message', { data: JSON.stringify(data) })
+        );
+    };
+
+    /** Simulate a connected socket (enough for send checks without a real WS server). */
+    const simulateConnected = (svc: CollaborationPresenceService): void => {
+        // Reach into private state to satisfy the connection guard without opening a real socket.
+        (svc as unknown as { connectionState: { set(v: string): void } }).connectionState.set('connected');
+        (svc as unknown as { connectedFlowId: number }).connectedFlowId = 1;
+        (svc as unknown as { socket: { send(d: string): void } | null }).socket = { send: jasmine.createSpy('send') };
+    };
+
+    beforeEach(() => {
+        TestBed.configureTestingModule({
+            providers: [
+                CollaborationPresenceService,
+                { provide: AuthService, useClass: AuthServiceStub },
+                { provide: ConfigService, useClass: ConfigServiceStub },
+                { provide: ActiveOrgService, useClass: ActiveOrgServiceStub },
+            ],
+        });
+        service = TestBed.inject(CollaborationPresenceService);
+        simulateConnected(service);
+    });
+
+    it('sendNodeMove is a no-op when isViewer is true', () => {
+        simulateMessage(service, { type: 'self', flow_id: 1, member_id: 'mx', user_id: 1, is_viewer: true });
+        const socket = (service as unknown as { socket: { send: jasmine.Spy } }).socket!;
+        service.sendNodeMove({ node_id: 1, x: 10, y: 20 });
+        expect(socket.send).not.toHaveBeenCalled();
+    });
+
+    it('sendNodeAdd is a no-op when isViewer is true', () => {
+        simulateMessage(service, { type: 'self', flow_id: 1, member_id: 'mx', user_id: 1, is_viewer: true });
+        const socket = (service as unknown as { socket: { send: jasmine.Spy } }).socket!;
+        service.sendNodeAdd({ node_key: 'nk', node: {} });
+        expect(socket.send).not.toHaveBeenCalled();
+    });
+
+    it('sendNodeDelete is a no-op when isViewer is true', () => {
+        simulateMessage(service, { type: 'self', flow_id: 1, member_id: 'mx', user_id: 1, is_viewer: true });
+        const socket = (service as unknown as { socket: { send: jasmine.Spy } }).socket!;
+        service.sendNodeDelete({ node_key: 'nk' });
+        expect(socket.send).not.toHaveBeenCalled();
+    });
+
+    it('sendConnectionAdd is a no-op when isViewer is true', () => {
+        simulateMessage(service, { type: 'self', flow_id: 1, member_id: 'mx', user_id: 1, is_viewer: true });
+        const socket = (service as unknown as { socket: { send: jasmine.Spy } }).socket!;
+        service.sendConnectionAdd({
+            connection_id: 'c1',
+            source_node_key: 'a',
+            target_node_key: 'b',
+            source_port_id: 'p1',
+            target_port_id: 'p2',
+            connection: {},
+        });
+        expect(socket.send).not.toHaveBeenCalled();
+    });
+
+    it('sendConnectionRemove is a no-op when isViewer is true', () => {
+        simulateMessage(service, { type: 'self', flow_id: 1, member_id: 'mx', user_id: 1, is_viewer: true });
+        const socket = (service as unknown as { socket: { send: jasmine.Spy } }).socket!;
+        service.sendConnectionRemove({ connection_id: 'c1' });
+        expect(socket.send).not.toHaveBeenCalled();
+    });
+
+    it('sendNodeDataUpdate is a no-op when isViewer is true', () => {
+        simulateMessage(service, { type: 'self', flow_id: 1, member_id: 'mx', user_id: 1, is_viewer: true });
+        const socket = (service as unknown as { socket: { send: jasmine.Spy } }).socket!;
+        service.sendNodeDataUpdate({ node_id: 1, node_name: 'n', data: {} });
+        expect(socket.send).not.toHaveBeenCalled();
+    });
+
+    it('sendLockRequest is a no-op when isViewer is true', () => {
+        simulateMessage(service, { type: 'self', flow_id: 1, member_id: 'mx', user_id: 1, is_viewer: true });
+        const socket = (service as unknown as { socket: { send: jasmine.Spy } }).socket!;
+        service.sendLockRequest({ node_id: 1 });
+        expect(socket.send).not.toHaveBeenCalled();
+    });
+
+    it('sendLockRelease is a no-op when isViewer is true', () => {
+        simulateMessage(service, { type: 'self', flow_id: 1, member_id: 'mx', user_id: 1, is_viewer: true });
+        const socket = (service as unknown as { socket: { send: jasmine.Spy } }).socket!;
+        service.sendLockRelease({ node_id: 1 });
+        expect(socket.send).not.toHaveBeenCalled();
+    });
+
+    it('sendCursor is NOT blocked when isViewer is true (cursor still allowed)', () => {
+        simulateMessage(service, { type: 'self', flow_id: 1, member_id: 'mx', user_id: 1, is_viewer: true });
+        const socket = (service as unknown as { socket: { send: jasmine.Spy } }).socket!;
+        service.sendCursor({ x: 5, y: 5 });
+        expect(socket.send).toHaveBeenCalled();
+    });
+});
+
+describe('CollaborationPresenceService — op_rejected handling', () => {
+    let service: CollaborationPresenceService;
+
+    const simulateMessage = (svc: CollaborationPresenceService, data: unknown): void => {
+        (svc as unknown as { handleMessage(e: MessageEvent): void }).handleMessage(
+            new MessageEvent('message', { data: JSON.stringify(data) })
+        );
+    };
+
+    beforeEach(() => {
+        TestBed.configureTestingModule({
+            providers: [
+                CollaborationPresenceService,
+                { provide: AuthService, useClass: AuthServiceStub },
+                { provide: ConfigService, useClass: ConfigServiceStub },
+                { provide: ActiveOrgService, useClass: ActiveOrgServiceStub },
+            ],
+        });
+        service = TestBed.inject(CollaborationPresenceService);
+    });
+
+    it('emits on opRejected$ when an op_rejected frame arrives', () => {
+        const emitted: OpRejectedMessage[] = [];
+        service.opRejected$.subscribe((msg) => emitted.push(msg));
+
+        const frame: OpRejectedMessage = { type: 'op_rejected', flow_id: 1, op: 'node_moved', reason: 'viewer' };
+        simulateMessage(service, frame);
+
+        expect(emitted.length).toBe(1);
+        expect(emitted[0].op).toBe('node_moved');
+    });
+
+    it('does not emit on opRejected$ for unrelated frames', () => {
+        const emitted: OpRejectedMessage[] = [];
+        service.opRejected$.subscribe((msg) => emitted.push(msg));
+
+        simulateMessage(service, { type: 'heartbeat_ack', flow_id: 1 });
+
+        expect(emitted.length).toBe(0);
     });
 });

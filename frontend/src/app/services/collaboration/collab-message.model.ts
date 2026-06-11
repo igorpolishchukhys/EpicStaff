@@ -1,6 +1,8 @@
 export interface PresenceParticipant {
     user_id: number;
     display_name: string | null;
+    /** Present when the server resolved the participant as read-only (viewer). Absent on older servers — treat as false. */
+    is_viewer?: boolean;
 }
 
 export interface PresenceMessage {
@@ -135,6 +137,17 @@ export interface SelfIdentityMessage {
     flow_id: number;
     member_id: string;
     user_id: number;
+    /** Present when the server resolved this connection as read-only (viewer). Absent on older servers — treat as false. */
+    is_viewer?: boolean;
+}
+
+/** Server → sender only. The server rejected a mutating operation because the sender is a viewer. */
+export interface OpRejectedMessage {
+    type: 'op_rejected';
+    flow_id: number;
+    /** The operation type that was rejected (e.g. 'node_moved', 'node_added', etc.). */
+    op: string;
+    reason: 'viewer';
 }
 
 export interface LockGrantedMessage {
@@ -458,5 +471,17 @@ export function isConnectionRemovedMessage(value: unknown): value is ConnectionR
         typeof record['flow_id'] === 'number' &&
         typeof record['connection_id'] === 'string' &&
         typeof record['origin'] === 'string'
+    );
+}
+
+export function isOpRejectedMessage(value: unknown): value is OpRejectedMessage {
+    const record = value as Record<string, unknown>;
+    return (
+        typeof value === 'object' &&
+        value !== null &&
+        record['type'] === 'op_rejected' &&
+        typeof record['flow_id'] === 'number' &&
+        typeof record['op'] === 'string' &&
+        record['reason'] === 'viewer'
     );
 }

@@ -104,6 +104,7 @@
                 <app-flow-base-node
                     [node]="node"
                     [showVariables]="flowSettings.showInputsOutputs()"
+                    [viewerMode]="isViewer()"
                     [fMinimapClass]="getMinimapClassForNode(node)"
                     [remoteSelection]="
                         node.backendId != null ? (remoteNodeSelectionMap().get(node.backendId) ?? null) : null
@@ -243,21 +244,23 @@
                             stroke="none"
                         ></path>
                     </svg>
-                    <div
-                        fConnectionContent
-                        class="connection-center"
-                        [position]="CONNECTION_DELETE_BUTTON_POSITION"
-                    >
-                        <button
-                            type="button"
-                            class="icon-button delete-icon"
-                            title="Delete connection"
-                            aria-label="Delete connection"
-                            (click)="onDeleteConnection($event, connection.id)"
+                    @if (canEdit()) {
+                        <div
+                            fConnectionContent
+                            class="connection-center"
+                            [position]="CONNECTION_DELETE_BUTTON_POSITION"
                         >
-                            <i class="ti ti-trash"></i>
-                        </button>
-                    </div>
+                            <button
+                                type="button"
+                                class="icon-button delete-icon"
+                                title="Delete connection"
+                                aria-label="Delete connection"
+                                (click)="onDeleteConnection($event, connection.id)"
+                            >
+                                <i class="ti ti-trash"></i>
+                            </button>
+                        </div>
+                    }
 
                     <f-connection-waypoints
                         appWaypointTooltip
@@ -335,7 +338,7 @@
         (undoRedoPerformed)="hasUnarrangedChanges.set(true)"
     ></app-flow-action-panel>
 
-    @if (showContextMenu()) {
+    @if (canEdit() && showContextMenu()) {
         <app-flow-graph-context-menu
             [position]="contextMenuPosition()"
             [currentFlowId]="currentFlowId"

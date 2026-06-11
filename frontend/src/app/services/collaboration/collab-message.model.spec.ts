@@ -1,7 +1,9 @@
 import {
     FlushRequestedMessage,
     isFlushRequestedMessage,
+    isOpRejectedMessage,
     isPresenceMessage,
+    OpRejectedMessage,
     PresenceMessage,
 } from './collab-message.model';
 
@@ -72,5 +74,41 @@ describe('PresenceMessage — designated_member_id field', () => {
             designated_member_id: null,
         };
         expect(isPresenceMessage(frame)).toBeTrue();
+    });
+});
+
+describe('isOpRejectedMessage', () => {
+    it('returns true for a valid op_rejected frame', () => {
+        const frame: OpRejectedMessage = {
+            type: 'op_rejected',
+            flow_id: 1,
+            op: 'node_moved',
+            reason: 'viewer',
+        };
+        expect(isOpRejectedMessage(frame)).toBeTrue();
+    });
+
+    it('returns false when type is wrong', () => {
+        expect(isOpRejectedMessage({ type: 'node_moved', flow_id: 1, op: 'node_moved', reason: 'viewer' })).toBeFalse();
+    });
+
+    it('returns false when reason is not "viewer"', () => {
+        expect(isOpRejectedMessage({ type: 'op_rejected', flow_id: 1, op: 'node_moved', reason: 'other' })).toBeFalse();
+    });
+
+    it('returns false when op is missing', () => {
+        expect(isOpRejectedMessage({ type: 'op_rejected', flow_id: 1, reason: 'viewer' })).toBeFalse();
+    });
+
+    it('returns false when flow_id is missing', () => {
+        expect(isOpRejectedMessage({ type: 'op_rejected', op: 'node_moved', reason: 'viewer' })).toBeFalse();
+    });
+
+    it('returns false for null', () => {
+        expect(isOpRejectedMessage(null)).toBeFalse();
+    });
+
+    it('returns false for a non-object', () => {
+        expect(isOpRejectedMessage('op_rejected')).toBeFalse();
     });
 });

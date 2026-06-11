@@ -1,6 +1,24 @@
 from pydantic import BaseModel, ConfigDict
 
 
+# EST-11: mutating operations that read-only viewers are not allowed to apply.
+# Single source of truth — imported by api.main and the viewer-presence tests.
+# Adding a mutating frame type here automatically covers both enforcement and
+# test coverage; forgetting to add it here is the only way to create a hole.
+VIEWER_BLOCKED_OPS: frozenset[str] = frozenset(
+    {
+        "node_moved",
+        "node_added",
+        "node_deleted",
+        "connection_added",
+        "connection_removed",
+        "node_data_updated",
+        "lock_request",
+        "lock_release",
+    }
+)
+
+
 class NodeMovedIn(BaseModel):
     """Inbound frame sent by a client when a node is moved.
 

@@ -49,6 +49,7 @@ from application.lock_service import LockService
 from application.heartbeat_monitor import HeartbeatMonitor
 from application.flush_coordinator import FlushCoordinator
 from domain.models.collab_messages import (
+    VIEWER_BLOCKED_OPS,
     NodeMovedIn,
     CursorMovedIn,
     SelectionChangedIn,
@@ -65,6 +66,9 @@ from pydantic import ValidationError
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+
+# _VIEWER_BLOCKED_OPS lives in domain.models.collab_messages (single source of
+# truth); imported as VIEWER_BLOCKED_OPS above.
 
 app = FastAPI()
 redis_service = RedisService(
@@ -314,6 +318,7 @@ async def root(
 async def collab_presence(
     websocket: WebSocket,
     flow_id: int | None = None,
+    org_id: int | None = None,
     token: str | None = None,
 ):
     """Collaborative presence + live-document WebSocket for the flow editor.
@@ -372,7 +377,15 @@ async def collab_presence(
         await websocket.close(code=1008)
         return
 
-    user_info = introspect_token(token)
+    # Reject missing flow_id before making any HTTP call — no point calling
+    # Django's introspect endpoint when we would reject the connection anyway.
+    if flow_id is None:
+        logger.warning("collab_presence: missing flow_id, closing 1008")
+        await websocket.close(code=1008)
+        return
+
+    # Pass flow_id + org_id so Django can compute can_edit in one round-trip.
+    user_info = introspect_token(token, flow_id=flow_id, org_id=org_id)
     if not user_info:
         logger.warning("collab_presence: invalid token, closing 1008")
         await websocket.close(code=1008)
@@ -386,10 +399,11 @@ async def collab_presence(
         await websocket.close(code=1008)
         return
 
-    if flow_id is None:
-        logger.warning("collab_presence: missing flow_id, closing 1008")
-        await websocket.close(code=1008)
-        return
+    # EST-11: a viewer cannot edit.  ``can_edit`` is present only when both
+    # flow_id and org_id were supplied; treat absence as True (no restriction)
+    # so callers that don't send org_id are unaffected.
+    can_edit = user_info.get("can_edit", True)
+    is_viewer: bool = can_edit is False
 
     await websocket.accept()
     member_id: str | None = None
@@ -399,8 +413,14 @@ async def collab_presence(
             websocket,
             user_id=user_id,
             display_name=user_info.get("display_name"),
+            is_viewer=is_viewer,
         )
-        logger.info("collab_presence: accepted flow={} member={}", flow_id, member_id)
+        logger.info(
+            "collab_presence: accepted flow={} member={} is_viewer={}",
+            flow_id,
+            member_id,
+            is_viewer,
+        )
 
         # EST-9: liveness tracking — silent connections are force-closed by
         # the heartbeat sweep so the finally block below releases their locks.
@@ -410,13 +430,15 @@ async def collab_presence(
         doc_state = await live_document_service.get_document_state(flow_id)
         await websocket.send_json(doc_state)
 
-        # Send the self frame so the client knows its own member_id and user_id.
+        # Send the self frame so the client knows its own member_id, user_id,
+        # and whether they are a read-only viewer.
         await websocket.send_json(
             {
                 "type": "self",
                 "flow_id": flow_id,
                 "member_id": member_id,
                 "user_id": user_id,
+                "is_viewer": is_viewer,
             }
         )
 
@@ -438,6 +460,25 @@ async def collab_presence(
             try:
                 data = json.loads(raw)
                 msg_type = data.get("type")
+
+                # EST-11: viewer enforcement — reject mutating ops before
+                # any service call so nothing is applied server-side.
+                if is_viewer and msg_type in VIEWER_BLOCKED_OPS:
+                    await websocket.send_json(
+                        {
+                            "type": "op_rejected",
+                            "reason": "viewer",
+                            "op": msg_type,
+                        }
+                    )
+                    logger.info(
+                        "collab_presence: viewer op rejected flow={} member={} op={}",
+                        flow_id,
+                        member_id,
+                        msg_type,
+                    )
+                    continue
+
                 if msg_type == "node_moved":
                     frame = NodeMovedIn(**data)
                     await live_document_service.apply_node_move(

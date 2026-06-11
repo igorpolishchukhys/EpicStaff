@@ -45,6 +45,7 @@ import {
 } from '@foblex/flow';
 import { Subject } from 'rxjs';
 
+import { PermissionsService } from '../../services/auth/permissions.service';
 import {
     ConnectionAddedMessage,
     ConnectionRemovedMessage,
@@ -198,6 +199,26 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     protected readonly hasUnarrangedChanges = signal(true);
     protected readonly isArranging = signal<boolean>(false);
     protected readonly flowSettings = inject(FlowSettingsService);
+
+    private readonly permissionsService = inject(PermissionsService);
+
+    /**
+     * True when the current user has the 'update' permission on 'flows' AND the
+     * server did not mark this collab session as read-only (viewer).
+     *
+     * Both gates must pass for edit affordances to be active:
+     *  - org RBAC: the user's role allows flow updates
+     *  - server viewer flag: the WS `self` frame did not set is_viewer=true
+     *
+     * This keeps canvas affordances coherent with the transport-level send guards
+     * in CollaborationPresenceService (which also short-circuit on isViewer()).
+     */
+    protected readonly canEdit = computed(
+        () => this.permissionsService.can('flows', 'update') && !this.collaborationPresenceService.isViewer()
+    );
+
+    /** Convenience inverse of canEdit — use in templates for @if(!canEdit()) guards. */
+    protected readonly isViewer = computed(() => !this.canEdit());
 
     protected readonly nodeColorMap = computed<Map<string, string>>(() => {
         const map = new Map<string, string>();
@@ -422,6 +443,10 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     }
 
     public onReassignConnection(event: FReassignConnectionEvent): void {
+        if (!this.canEdit()) {
+            return;
+        }
+
         this.hasUnarrangedChanges.set(true);
         if (!event.newTargetId && !event.newSourceId) {
             console.warn('No new target or source provided for reassignment');
@@ -472,6 +497,10 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     }
 
     public onConnectionAdded(event: FCreateConnectionEvent): void {
+        if (!this.canEdit()) {
+            return;
+        }
+
         this.hasUnarrangedChanges.set(true);
 
         const { fOutputId, fInputId } = event;
@@ -559,6 +588,10 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     }
 
     public onPaste(): void {
+        if (!this.canEdit()) {
+            return;
+        }
+
         this.hasUnarrangedChanges.set(true);
         if (this.isDialogOpen()) {
             return;
@@ -636,6 +669,10 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     }
 
     public onDelete(): void {
+        if (!this.canEdit()) {
+            return;
+        }
+
         this.hasUnarrangedChanges.set(true);
         if (this.isDialogOpen()) {
             return;
@@ -646,6 +683,10 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     }
 
     public onDeleteNode(node: NodeModel): void {
+        if (!this.canEdit()) {
+            return;
+        }
+
         this.hasUnarrangedChanges.set(true);
         this.deleteSelections({
             fNodeIds: [node.id],
@@ -655,10 +696,14 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     }
 
     public onDeleteConnection(event: MouseEvent, connectionId: string): void {
-        this.hasUnarrangedChanges.set(true);
         event.preventDefault();
         event.stopPropagation();
 
+        if (!this.canEdit()) {
+            return;
+        }
+
+        this.hasUnarrangedChanges.set(true);
         if (this.isDialogOpen()) {
             return;
         }
@@ -730,6 +775,9 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
 
     public onContextMenu(event: MouseEvent): void {
         event.preventDefault();
+        if (!this.canEdit()) {
+            return;
+        }
         this.contextMenuPosition.set({ x: event.clientX, y: event.clientY });
         this.showContextMenu.set(true);
     }
@@ -739,6 +787,11 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     }
 
     public onAddNodeFromContextMenu(event: CreateNodeRequest): void {
+        if (!this.canEdit()) {
+            this.showContextMenu.set(false);
+            return;
+        }
+
         this.hasUnarrangedChanges.set(true);
         this.showContextMenu.set(false);
 
@@ -938,6 +991,9 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     }
 
     public onDragStarted(event: FDragStartedEvent): void {
+        if (!this.canEdit()) {
+            return;
+        }
         this.isDragging = true;
         this.draggingElements.clear();
         // Capture pre-drag positions so we can build the inverse move op at drag end.

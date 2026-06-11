@@ -2,11 +2,24 @@
     <span
         class="avatar"
         [class.avatar--you]="avatar.isCurrentUser"
+        [class.avatar--viewer]="avatar.isViewer"
         [ngStyle]="{ '--avatar-color': avatar.color }"
         [title]="avatar.label"
         [attr.aria-label]="avatar.label"
-        >{{ avatar.initials }}</span
     >
+        {{ avatar.initials }}
+        @if (avatar.isViewer) {
+            <span
+                class="avatar__viewer-badge"
+                aria-hidden="true"
+            >
+                <app-svg-icon
+                    icon="eye"
+                    size="0.5rem"
+                />
+            </span>
+        }
+    </span>
 }
 
 @if (overflowCount() > 0) {
