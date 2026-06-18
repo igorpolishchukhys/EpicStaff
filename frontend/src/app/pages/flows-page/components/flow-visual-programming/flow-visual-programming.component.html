@@ -49,6 +49,7 @@
             [initialNodeId]="initialNodeId"
             (save)="onGraphSave($event)"
             (openShortcuts)="openShortcutsModal($event)"
+            (runRequested)="handleRunFlow()"
         ></app-flow-graph>
         <app-shortcuts-modal
             [open]="isShortcutsOpen()"

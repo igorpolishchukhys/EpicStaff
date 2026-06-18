@@ -16,13 +16,56 @@ import { AppSvgIconComponent } from '../../../shared/components/app-svg-icon/app
 import { FlowGraphBlock, NODE_BLOCKS } from '../../core/constants/node-blocks';
 import { NodeType } from '../../core/enums/node-type';
 import { fuzzyMatch } from '../../core/helpers/fuzzy-match';
-import { CreateNodeRequest } from '../../core/models/node-creation.types';
+import { EditorActionId, PaletteResult } from '../../core/models/command-palette.types';
 import { FlowService } from '../../services/flow.service';
+import { UndoRedoService } from '../../services/undo-redo.service';
 
-/** A block entry annotated with its disabled state for rendering. */
-interface PaletteEntry extends FlowGraphBlock {
+// ---------------------------------------------------------------------------
+// Local types
+// ---------------------------------------------------------------------------
+
+/** A node block entry annotated with its disabled state for rendering. */
+interface PaletteNodeEntry extends FlowGraphBlock {
+    kind: 'node';
     disabled: boolean;
 }
+
+/** An action entry annotated with its disabled state for rendering. */
+interface PaletteActionEntry {
+    kind: 'action';
+    id: EditorActionId;
+    label: string;
+    icon: string;
+    shortcut?: readonly string[];
+    disabled: boolean;
+}
+
+type PaletteRow = PaletteNodeEntry | PaletteActionEntry;
+
+// ---------------------------------------------------------------------------
+// Action definitions (palette-specific UI; NOT a shared module concern)
+// ---------------------------------------------------------------------------
+
+interface ActionDefinition {
+    id: EditorActionId;
+    label: string;
+    icon: string;
+    shortcut?: readonly string[];
+}
+
+const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
+    { id: EditorActionId.RunFlow, label: 'Run flow', icon: 'ti ti-player-play' },
+    { id: EditorActionId.Save, label: 'Save', icon: 'ti ti-device-floppy', shortcut: ['mod', 'S'] },
+    { id: EditorActionId.Undo, label: 'Undo', icon: 'ti ti-arrow-back-up', shortcut: ['mod', 'Z'] },
+    { id: EditorActionId.Redo, label: 'Redo', icon: 'ti ti-arrow-forward-up', shortcut: ['mod', 'Shift', 'Z'] },
+    { id: EditorActionId.FitToScreen, label: 'Fit to screen', icon: 'ti ti-arrows-maximize' },
+    { id: EditorActionId.OpenSettings, label: 'Open settings', icon: 'ti ti-settings' },
+    { id: EditorActionId.OpenShortcuts, label: 'Open shortcuts', icon: 'ti ti-keyboard', shortcut: ['mod', '/'] },
+] as const;
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 @Component({
     selector: 'app-command-palette',
@@ -40,7 +83,7 @@ interface PaletteEntry extends FlowGraphBlock {
                 (keydown)="onKeyDown($event)"
                 role="dialog"
                 aria-modal="true"
-                aria-label="Add node"
+                aria-label="Search actions and nodes"
             >
                 <div class="palette-header">
                     <div class="search-row">
@@ -53,11 +96,11 @@ interface PaletteEntry extends FlowGraphBlock {
                             #searchInput
                             class="search-input"
                             type="text"
-                            placeholder="Search nodes…"
+                            placeholder="Search actions and nodes…"
                             autocomplete="off"
                             spellcheck="false"
                             [formControl]="searchControl"
-                            aria-label="Search nodes"
+                            aria-label="Search actions and nodes"
                             aria-autocomplete="list"
                             [attr.aria-activedescendant]="activeDescendantId()"
                         />
@@ -76,38 +119,83 @@ interface PaletteEntry extends FlowGraphBlock {
                 <ul
                     class="node-list"
                     role="listbox"
-                    aria-label="Available node types"
+                    aria-label="Actions and node types"
                 >
-                    @for (entry of filteredEntries(); track entry.type; let i = $index) {
+                    <!-- Actions group -->
+                    @if (filteredActions().length > 0) {
                         <li
-                            class="node-item"
-                            [class.highlighted]="i === highlightedIndex()"
-                            [class.disabled]="entry.disabled"
-                            [attr.id]="'palette-option-' + entry.type"
-                            role="option"
-                            [attr.aria-selected]="i === highlightedIndex()"
-                            [attr.aria-disabled]="entry.disabled"
-                            (click)="selectEntry(entry)"
-                            (mouseenter)="!entry.disabled && highlightedIndex.set(i)"
+                            class="group-header"
+                            role="presentation"
                         >
-                            <span
-                                class="node-color-bar"
-                                [style.background-color]="entry.color"
-                            ></span>
-                            <i
-                                class="node-icon"
-                                [class]="entry.icon"
-                                [style.color]="entry.color"
-                            ></i>
-                            <span class="node-label">{{ entry.label }}</span>
-                            @if (entry.disabled) {
-                                <span class="disabled-hint">Already added</span>
-                            }
+                            Actions
                         </li>
+                        @for (action of filteredActions(); track action.id; let i = $index) {
+                            <li
+                                class="node-item action-item"
+                                [class.highlighted]="flatIndexOf('action', i) === highlightedIndex()"
+                                [class.disabled]="action.disabled"
+                                [attr.id]="'palette-action-' + action.id"
+                                role="option"
+                                [attr.aria-selected]="flatIndexOf('action', i) === highlightedIndex()"
+                                [attr.aria-disabled]="action.disabled"
+                                (click)="selectRow(action)"
+                                (mouseenter)="!action.disabled && highlightedIndex.set(flatIndexOf('action', i))"
+                            >
+                                <i
+                                    class="node-icon action-icon"
+                                    [class]="action.icon"
+                                ></i>
+                                <span class="node-label">{{ action.label }}</span>
+                                @if (action.shortcut) {
+                                    <span class="shortcut-chips">
+                                        @for (token of action.shortcut; track token) {
+                                            <span class="esc-label key-chip">{{ renderToken(token) }}</span>
+                                        }
+                                    </span>
+                                }
+                            </li>
+                        }
                     }
 
-                    @if (filteredEntries().length === 0) {
-                        <li class="no-results">No nodes match "{{ searchControl.value }}"</li>
+                    <!-- Nodes group -->
+                    @if (filteredEntries().length > 0) {
+                        <li
+                            class="group-header"
+                            role="presentation"
+                        >
+                            Nodes
+                        </li>
+                        @for (entry of filteredEntries(); track entry.type; let i = $index) {
+                            <li
+                                class="node-item"
+                                [class.highlighted]="flatIndexOf('node', i) === highlightedIndex()"
+                                [class.disabled]="entry.disabled"
+                                [attr.id]="'palette-option-' + entry.type"
+                                role="option"
+                                [attr.aria-selected]="flatIndexOf('node', i) === highlightedIndex()"
+                                [attr.aria-disabled]="entry.disabled"
+                                (click)="selectRow(entry)"
+                                (mouseenter)="!entry.disabled && highlightedIndex.set(flatIndexOf('node', i))"
+                            >
+                                <span
+                                    class="node-color-bar"
+                                    [style.background-color]="entry.color"
+                                ></span>
+                                <i
+                                    class="node-icon"
+                                    [class]="entry.icon"
+                                    [style.color]="entry.color"
+                                ></i>
+                                <span class="node-label">{{ entry.label }}</span>
+                                @if (entry.disabled) {
+                                    <span class="disabled-hint">Already added</span>
+                                }
+                            </li>
+                        }
+                    }
+
+                    @if (filteredActions().length === 0 && filteredEntries().length === 0) {
+                        <li class="no-results">No results match "{{ searchControl.value }}"</li>
                     }
                 </ul>
             </div>
@@ -212,6 +300,20 @@ interface PaletteEntry extends FlowGraphBlock {
                 color: var(--accent-color, #685fff);
             }
 
+            /* Group headers */
+
+            .group-header {
+                list-style: none;
+                padding: 0.375rem 0.75rem 0.25rem;
+                font-size: 0.6875rem;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.06em;
+                color: var(--color-text-primary, #d9d9de);
+                opacity: 0.45;
+                user-select: none;
+            }
+
             /* Node list */
 
             .node-list {
@@ -263,6 +365,15 @@ interface PaletteEntry extends FlowGraphBlock {
                 text-align: center;
             }
 
+            /* Action rows: icon in accent color, no color bar */
+            .action-item {
+                padding-left: 0.75rem;
+            }
+
+            .action-icon {
+                color: var(--accent-color, #685fff);
+            }
+
             .node-label {
                 flex: 1;
                 font-size: 0.9375rem;
@@ -273,6 +384,20 @@ interface PaletteEntry extends FlowGraphBlock {
                 font-size: 0.75rem;
                 opacity: 0.6;
                 color: var(--color-text-primary, #d9d9de);
+            }
+
+            /* Shortcut key chips */
+
+            .shortcut-chips {
+                display: flex;
+                align-items: center;
+                gap: 0.25rem;
+                flex-shrink: 0;
+            }
+
+            .key-chip {
+                /* Inherits .esc-label base; add slight size variation for readability */
+                font-size: 0.625rem;
             }
 
             .no-results {
@@ -291,15 +416,47 @@ export class CommandPaletteComponent implements AfterViewInit {
     // --- Signals & Computed ---
     readonly highlightedIndex = signal(0);
 
-    readonly filteredEntries = computed<PaletteEntry[]>(() => {
+    readonly filteredActions = computed<PaletteActionEntry[]>(() => {
+        const query = this.querySignal() ?? '';
+        const canUndo = this.undoRedo.canUndo();
+        const canRedo = this.undoRedo.canRedo();
+
+        const toEntry = (def: ActionDefinition): PaletteActionEntry => ({
+            kind: 'action',
+            id: def.id,
+            label: def.label,
+            icon: def.icon,
+            shortcut: def.shortcut,
+            disabled: (def.id === EditorActionId.Undo && !canUndo) || (def.id === EditorActionId.Redo && !canRedo),
+        });
+
+        if (query.trim().length === 0) {
+            return ACTION_DEFINITIONS.map(toEntry);
+        }
+
+        const scored: { def: ActionDefinition; score: number }[] = [];
+        for (const def of ACTION_DEFINITIONS) {
+            const score = fuzzyMatch(query, def.label);
+            if (score !== null) {
+                scored.push({ def, score });
+            }
+        }
+        scored.sort((a, b) => b.score - a.score);
+        return scored.map(({ def }) => toEntry(def));
+    });
+
+    readonly filteredEntries = computed<PaletteNodeEntry[]>(() => {
         const query = this.querySignal() ?? '';
         const hasEnd = this.flowService.hasEndNode();
 
+        const toEntry = (block: FlowGraphBlock): PaletteNodeEntry => ({
+            ...block,
+            kind: 'node',
+            disabled: block.type === NodeType.END && hasEnd,
+        });
+
         if (query.trim().length === 0) {
-            return NODE_BLOCKS.map((block) => ({
-                ...block,
-                disabled: block.type === NodeType.END && hasEnd,
-            }));
+            return NODE_BLOCKS.map(toEntry);
         }
 
         const scored: { block: FlowGraphBlock; score: number }[] = [];
@@ -309,21 +466,26 @@ export class CommandPaletteComponent implements AfterViewInit {
                 scored.push({ block, score });
             }
         }
-
         scored.sort((a, b) => b.score - a.score);
-
-        return scored.map(({ block }) => ({
-            ...block,
-            disabled: block.type === NodeType.END && hasEnd,
-        }));
+        return scored.map(({ block }) => toEntry(block));
     });
+
+    /** Flat ordered list of all visible rows: actions first, then nodes. */
+    private readonly flatRows = computed<PaletteRow[]>(() => [...this.filteredActions(), ...this.filteredEntries()]);
 
     readonly activeDescendantId = computed<string | null>(() => {
-        const entries = this.filteredEntries();
+        const rows = this.flatRows();
         const index = this.highlightedIndex();
-        if (index < 0 || index >= entries.length) return null;
-        return `palette-option-${entries[index].type}`;
+        if (index < 0 || index >= rows.length) return null;
+        const row = rows[index];
+        return row.kind === 'action' ? `palette-action-${row.id}` : `palette-option-${row.type}`;
     });
+
+    // --- Public template-bound properties ---
+
+    /** Whether we are on macOS — used to render 'mod' token as ⌘ vs Ctrl. */
+    readonly isMac =
+        typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent);
 
     // --- Private fields ---
     readonly searchControl = new FormControl('', { nonNullable: true });
@@ -332,32 +494,47 @@ export class CommandPaletteComponent implements AfterViewInit {
         initialValue: '',
     });
 
-    private readonly dialogRef = inject(DialogRef<CreateNodeRequest>);
+    private readonly dialogRef = inject(DialogRef<PaletteResult>);
     private readonly flowService = inject(FlowService);
+    private readonly undoRedo = inject(UndoRedoService);
 
     constructor() {
-        // Reset highlight when the filtered list changes.
-        // Use takeUntilDestroyed so this subscription is cleaned up automatically.
+        // Reset highlight to first enabled row whenever the filter changes.
         this.searchControl.valueChanges.pipe(takeUntilDestroyed()).subscribe(() => {
-            this.highlightedIndex.set(0);
+            this.highlightedIndex.set(this.findFirstEnabled());
         });
     }
 
     // --- Lifecycle ---
     ngAfterViewInit(): void {
         this.searchInputRef.nativeElement.focus();
+        // Set initial highlight after view initialises so signals are settled.
+        this.highlightedIndex.set(this.findFirstEnabled());
     }
 
     // --- Public methods ---
 
-    onKeyDown(event: KeyboardEvent): void {
-        const entries = this.filteredEntries();
-        const current = this.highlightedIndex();
+    /** Returns the flat index for an action or node row by its within-group index. */
+    flatIndexOf(group: 'action' | 'node', groupIndex: number): number {
+        if (group === 'action') {
+            return groupIndex;
+        }
+        return this.filteredActions().length + groupIndex;
+    }
 
+    /** Renders a shortcut modifier token as the platform-correct label. */
+    renderToken(token: string): string {
+        if (token === 'mod') {
+            return this.isMac ? '⌘' : 'Ctrl';
+        }
+        return token;
+    }
+
+    onKeyDown(event: KeyboardEvent): void {
         switch (event.key) {
             case 'ArrowDown': {
                 event.preventDefault();
-                const next = this.findNextEnabled(entries, current, 1);
+                const next = this.findNextEnabled(this.highlightedIndex(), 1);
                 if (next !== null) {
                     this.highlightedIndex.set(next);
                 }
@@ -365,7 +542,7 @@ export class CommandPaletteComponent implements AfterViewInit {
             }
             case 'ArrowUp': {
                 event.preventDefault();
-                const prev = this.findNextEnabled(entries, current, -1);
+                const prev = this.findNextEnabled(this.highlightedIndex(), -1);
                 if (prev !== null) {
                     this.highlightedIndex.set(prev);
                 }
@@ -373,9 +550,10 @@ export class CommandPaletteComponent implements AfterViewInit {
             }
             case 'Enter': {
                 event.preventDefault();
-                const entry = entries[current];
-                if (entry && !entry.disabled) {
-                    this.selectEntry(entry);
+                const rows = this.flatRows();
+                const row = rows[this.highlightedIndex()];
+                if (row && !row.disabled) {
+                    this.selectRow(row);
                 }
                 break;
             }
@@ -387,12 +565,15 @@ export class CommandPaletteComponent implements AfterViewInit {
         }
     }
 
-    selectEntry(entry: PaletteEntry): void {
-        if (entry.disabled) {
+    selectRow(row: PaletteRow): void {
+        if (row.disabled) {
             return;
         }
-        const request: CreateNodeRequest = { type: entry.type };
-        this.dialogRef.close(request);
+        if (row.kind === 'action') {
+            this.dialogRef.close({ kind: 'action', actionId: row.id });
+        } else {
+            this.dialogRef.close({ kind: 'create-node', request: { type: row.type } });
+        }
     }
 
     close(): void {
@@ -402,17 +583,34 @@ export class CommandPaletteComponent implements AfterViewInit {
     // --- Private methods ---
 
     /**
-     * Starting from `fromIndex`, walks in `direction` (+1 or -1) to find the
-     * next enabled entry index. Returns `null` if none found.
+     * Returns the flat index of the first enabled row, or 0 if all are disabled.
      */
-    private findNextEnabled(entries: PaletteEntry[], fromIndex: number, direction: 1 | -1): number | null {
-        let index = fromIndex + direction;
-        while (index >= 0 && index < entries.length) {
-            if (!entries[index].disabled) {
-                return index;
-            }
-            index += direction;
+    private findFirstEnabled(): number {
+        const rows = this.flatRows();
+        for (let i = 0; i < rows.length; i++) {
+            if (!rows[i].disabled) return i;
         }
-        return null;
+        return 0;
+    }
+
+    /**
+     * Starting from `fromIndex`, walks in `direction` (+1 or -1) with wrap-around
+     * to find the next enabled row. Scans at most N rows (full list length).
+     * Returns `null` only when every row is disabled.
+     */
+    private findNextEnabled(fromIndex: number, direction: 1 | -1): number | null {
+        const rows = this.flatRows();
+        if (rows.length === 0) return null;
+
+        let index = (((fromIndex + direction) % rows.length) + rows.length) % rows.length;
+        let scanned = 0;
+
+        while (scanned < rows.length) {
+            if (!rows[index].disabled) return index;
+            index = (((index + direction) % rows.length) + rows.length) % rows.length;
+            scanned++;
+        }
+
+        return null; // All rows disabled.
     }
 }
