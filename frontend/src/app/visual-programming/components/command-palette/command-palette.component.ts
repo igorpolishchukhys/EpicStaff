@@ -14,9 +14,11 @@ import { FormControl, ReactiveFormsModule } from '@angular/forms';
 
 import { AppSvgIconComponent } from '../../../shared/components/app-svg-icon/app-svg-icon.component';
 import { FlowGraphBlock, NODE_BLOCKS } from '../../core/constants/node-blocks';
+import { getNodeTitle } from '../../core/enums/node-title.util';
 import { NodeType } from '../../core/enums/node-type';
 import { fuzzyMatch } from '../../core/helpers/fuzzy-match';
 import { EditorActionId, PaletteResult } from '../../core/models/command-palette.types';
+import { NodeModel } from '../../core/models/node.model';
 import { FlowService } from '../../services/flow.service';
 import { UndoRedoService } from '../../services/undo-redo.service';
 
@@ -40,7 +42,14 @@ interface PaletteActionEntry {
     disabled: boolean;
 }
 
-type PaletteRow = PaletteNodeEntry | PaletteActionEntry;
+/** A canvas-node entry for the "Go to node" group. Never disabled. */
+interface PaletteGotoEntry {
+    kind: 'goto';
+    nodeId: string;
+    label: string;
+}
+
+type PaletteRow = PaletteNodeEntry | PaletteActionEntry | PaletteGotoEntry;
 
 // ---------------------------------------------------------------------------
 // Action definitions (palette-specific UI; NOT a shared module concern)
@@ -157,6 +166,30 @@ const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
                         }
                     }
 
+                    <!-- Go to node group -->
+                    @if (filteredGotoNodes().length > 0) {
+                        <li
+                            class="group-header"
+                            role="presentation"
+                        >
+                            Go to node
+                        </li>
+                        @for (goto of filteredGotoNodes(); track goto.nodeId; let i = $index) {
+                            <li
+                                class="node-item action-item"
+                                [class.highlighted]="flatIndexOf('goto', i) === highlightedIndex()"
+                                [attr.id]="'palette-goto-' + goto.nodeId"
+                                role="option"
+                                [attr.aria-selected]="flatIndexOf('goto', i) === highlightedIndex()"
+                                (click)="selectRow(goto)"
+                                (mouseenter)="highlightedIndex.set(flatIndexOf('goto', i))"
+                            >
+                                <i class="node-icon action-icon ti ti-focus-2"></i>
+                                <span class="node-label">{{ goto.label }}</span>
+                            </li>
+                        }
+                    }
+
                     <!-- Nodes group -->
                     @if (filteredEntries().length > 0) {
                         <li
@@ -194,7 +227,11 @@ const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
                         }
                     }
 
-                    @if (filteredActions().length === 0 && filteredEntries().length === 0) {
+                    @if (
+                        filteredActions().length === 0 &&
+                        filteredGotoNodes().length === 0 &&
+                        filteredEntries().length === 0
+                    ) {
                         <li class="no-results">No results match "{{ searchControl.value }}"</li>
                     }
                 </ul>
@@ -445,6 +482,31 @@ export class CommandPaletteComponent implements AfterViewInit {
         return scored.map(({ def }) => toEntry(def));
     });
 
+    readonly filteredGotoNodes = computed<PaletteGotoEntry[]>(() => {
+        const query = this.querySignal() ?? '';
+
+        const toEntry = (node: NodeModel): PaletteGotoEntry => ({
+            kind: 'goto',
+            nodeId: node.id,
+            label: getNodeTitle(node) || node.node_name || node.type,
+        });
+
+        if (query.trim().length === 0) {
+            return this.flowService.nodes().map(toEntry);
+        }
+
+        const scored: { node: NodeModel; score: number }[] = [];
+        for (const node of this.flowService.nodes()) {
+            const label = getNodeTitle(node) || node.node_name || node.type;
+            const score = fuzzyMatch(query, label);
+            if (score !== null) {
+                scored.push({ node, score });
+            }
+        }
+        scored.sort((a, b) => b.score - a.score);
+        return scored.map(({ node }) => toEntry(node));
+    });
+
     readonly filteredEntries = computed<PaletteNodeEntry[]>(() => {
         const query = this.querySignal() ?? '';
         const hasEnd = this.flowService.hasEndNode();
@@ -470,15 +532,21 @@ export class CommandPaletteComponent implements AfterViewInit {
         return scored.map(({ block }) => toEntry(block));
     });
 
-    /** Flat ordered list of all visible rows: actions first, then nodes. */
-    private readonly flatRows = computed<PaletteRow[]>(() => [...this.filteredActions(), ...this.filteredEntries()]);
+    /** Flat ordered list of all visible rows: actions first, then goto nodes, then node-type entries. */
+    private readonly flatRows = computed<PaletteRow[]>(() => [
+        ...this.filteredActions(),
+        ...this.filteredGotoNodes(),
+        ...this.filteredEntries(),
+    ]);
 
     readonly activeDescendantId = computed<string | null>(() => {
         const rows = this.flatRows();
         const index = this.highlightedIndex();
         if (index < 0 || index >= rows.length) return null;
         const row = rows[index];
-        return row.kind === 'action' ? `palette-action-${row.id}` : `palette-option-${row.type}`;
+        if (row.kind === 'action') return `palette-action-${row.id}`;
+        if (row.kind === 'goto') return `palette-goto-${row.nodeId}`;
+        return `palette-option-${row.type}`;
     });
 
     // --- Public template-bound properties ---
@@ -514,12 +582,15 @@ export class CommandPaletteComponent implements AfterViewInit {
 
     // --- Public methods ---
 
-    /** Returns the flat index for an action or node row by its within-group index. */
-    flatIndexOf(group: 'action' | 'node', groupIndex: number): number {
+    /** Returns the flat index for a row by its group and within-group index. */
+    flatIndexOf(group: 'action' | 'goto' | 'node', groupIndex: number): number {
         if (group === 'action') {
             return groupIndex;
         }
-        return this.filteredActions().length + groupIndex;
+        if (group === 'goto') {
+            return this.filteredActions().length + groupIndex;
+        }
+        return this.filteredActions().length + this.filteredGotoNodes().length + groupIndex;
     }
 
     /** Renders a shortcut modifier token as the platform-correct label. */
@@ -552,7 +623,7 @@ export class CommandPaletteComponent implements AfterViewInit {
                 event.preventDefault();
                 const rows = this.flatRows();
                 const row = rows[this.highlightedIndex()];
-                if (row && !row.disabled) {
+                if (row && (row.kind === 'goto' || !row.disabled)) {
                     this.selectRow(row);
                 }
                 break;
@@ -566,11 +637,13 @@ export class CommandPaletteComponent implements AfterViewInit {
     }
 
     selectRow(row: PaletteRow): void {
-        if (row.disabled) {
+        if (row.kind !== 'goto' && row.disabled) {
             return;
         }
         if (row.kind === 'action') {
             this.dialogRef.close({ kind: 'action', actionId: row.id });
+        } else if (row.kind === 'goto') {
+            this.dialogRef.close({ kind: 'goto-node', nodeId: row.nodeId });
         } else {
             this.dialogRef.close({ kind: 'create-node', request: { type: row.type } });
         }
@@ -583,12 +656,26 @@ export class CommandPaletteComponent implements AfterViewInit {
     // --- Private methods ---
 
     /**
+     * Returns true if the given row is currently disabled.
+     *
+     * The `row.kind !== 'goto'` guard encodes the invariant that `PaletteGotoEntry`
+     * rows are **never** disabled — the type has no `disabled` field. If a future
+     * change needs to disable goto rows (e.g. nodes that no longer exist), that
+     * field must be added to `PaletteGotoEntry` AND `findFirstEnabled` /
+     * `findNextEnabled` will continue to work correctly because they delegate here —
+     * no changes to those helpers are needed beyond adding the field.
+     */
+    private isRowDisabled(row: PaletteRow): boolean {
+        return row.kind !== 'goto' && row.disabled;
+    }
+
+    /**
      * Returns the flat index of the first enabled row, or 0 if all are disabled.
      */
     private findFirstEnabled(): number {
         const rows = this.flatRows();
         for (let i = 0; i < rows.length; i++) {
-            if (!rows[i].disabled) return i;
+            if (!this.isRowDisabled(rows[i])) return i;
         }
         return 0;
     }
@@ -606,7 +693,7 @@ export class CommandPaletteComponent implements AfterViewInit {
         let scanned = 0;
 
         while (scanned < rows.length) {
-            if (!rows[index].disabled) return index;
+            if (!this.isRowDisabled(rows[index])) return index;
             index = (((index + direction) % rows.length) + rows.length) % rows.length;
             scanned++;
         }
