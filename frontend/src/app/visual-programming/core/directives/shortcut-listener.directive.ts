@@ -13,6 +13,7 @@ export class ShortcutListenerDirective implements OnInit, OnDestroy {
     @Output() save = new EventEmitter<void>();
     @Output() escape = new EventEmitter<void>();
     @Output() openShortcuts = new EventEmitter<void>();
+    @Output() openCommandPalette = new EventEmitter<void>();
 
     private sub!: Subscription;
     private readonly allowedKeys = new Set([
@@ -28,6 +29,7 @@ export class ShortcutListenerDirective implements OnInit, OnDestroy {
         'к',
         's',
         'ы',
+        'k',
         'delete',
         'backspace',
         'escape',
@@ -54,6 +56,14 @@ export class ShortcutListenerDirective implements OnInit, OnDestroy {
                         }
 
                         if (mod && evt.code === 'KeyS') {
+                            const el = evt.target as HTMLElement;
+                            if (el.matches('input,textarea,select,[contenteditable="true"]')) {
+                                return false;
+                            }
+                            return true;
+                        }
+
+                        if (mod && evt.code === 'KeyK') {
                             const el = evt.target as HTMLElement;
                             if (el.matches('input,textarea,select,[contenteditable="true"]')) {
                                 return false;
@@ -115,6 +125,12 @@ export class ShortcutListenerDirective implements OnInit, OnDestroy {
             event.preventDefault();
             event.stopPropagation();
             this.save.emit();
+            return;
+        }
+        if (event.code === 'KeyK' && (event.ctrlKey || event.metaKey)) {
+            event.preventDefault();
+            event.stopPropagation();
+            this.openCommandPalette.emit();
             return;
         }
         const mod = event.ctrlKey || event.metaKey;
