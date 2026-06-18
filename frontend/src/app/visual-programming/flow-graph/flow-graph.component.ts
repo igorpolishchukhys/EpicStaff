@@ -95,7 +95,12 @@ import {
     getPortPosition,
     normalizeConnectionWaypoints,
 } from '../core/helpers/segment-avoidance.helper';
-import { EditorActionId, PaletteResult } from '../core/models/command-palette.types';
+import {
+    CommandPaletteData,
+    EditorActionId,
+    MUTATING_EDITOR_ACTIONS,
+    PaletteResult,
+} from '../core/models/command-palette.types';
 import { ConnectionModel } from '../core/models/connection.model';
 import { FlowModel } from '../core/models/flow.model';
 import { GraphNoteModel, NodeModel, ProjectNodeModel, StartNodeModel } from '../core/models/node.model';
@@ -1536,6 +1541,7 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
 
         const dialogRef = this.dialog.open<PaletteResult>(CommandPaletteComponent, {
             panelClass: 'command-palette-panel',
+            data: { canMutate: this.canEdit() } satisfies CommandPaletteData,
         });
 
         dialogRef.closed.subscribe((result: PaletteResult | undefined) => {
@@ -1568,6 +1574,9 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     }
 
     private dispatchEditorAction(actionId: EditorActionId): void {
+        if (MUTATING_EDITOR_ACTIONS.has(actionId) && !this.canEdit()) {
+            return;
+        }
         switch (actionId) {
             case EditorActionId.RunFlow:
                 this.runRequested.emit();
