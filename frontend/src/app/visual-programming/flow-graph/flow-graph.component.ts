@@ -798,32 +798,10 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
         this.hasUnarrangedChanges.set(true);
         this.showContextMenu.set(false);
 
-        if (event.type === NodeType.END && this.flowService.hasEndNode()) {
-            this.toastService.warning('Only one End node is allowed', 4000, 'bottom-right');
-            return;
-        }
-
-        if (this.isDialogOpen()) {
-            return;
-        }
-
-        const position = this.fFlowComponent.getPositionInFlow(
+        this.createNodeAt(
+            event,
             PointExtensions.initialize(this.contextMenuPosition().x, this.contextMenuPosition().y)
         );
-        const newNode = this.nodeFactory.createNode(event.type, { ...event.overrides, position });
-
-        this.undoRedoService.recordOp({
-            kind: 'add_node',
-            node: newNode,
-        } satisfies OpAddNode);
-        this.flowService.addNode(newNode);
-
-        if (!this.applyingRemote) {
-            this.collaborationPresenceService.sendNodeAdd({
-                node_key: this.nodeKey(newNode),
-                node: newNode,
-            });
-        }
     }
 
     public onOpenNodePanel(node: NodeModel): void {
@@ -1552,12 +1530,26 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             return;
         }
 
-        const dialogRef = this.dialog.open(CommandPaletteComponent, {
+        const dialogRef = this.dialog.open<CreateNodeRequest>(CommandPaletteComponent, {
             panelClass: 'command-palette-panel',
         });
 
-        dialogRef.closed.subscribe(() => {
+        dialogRef.closed.subscribe((request: CreateNodeRequest | undefined) => {
             this.hostRef.nativeElement.focus();
+
+            if (!request) {
+                return;
+            }
+
+            // Compute viewport-center screen point from the host element bounds.
+            const rect = this.hostRef.nativeElement.getBoundingClientRect();
+            const centerScreenPoint = PointExtensions.initialize(
+                rect.left + rect.width / 2,
+                rect.top + rect.height / 2
+            );
+
+            this.hasUnarrangedChanges.set(true);
+            this.createNodeAt(request, centerScreenPoint);
         });
     }
 
@@ -1801,6 +1793,48 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
 
     private isDialogOpen(): boolean {
         return this.dialog.openDialogs.length > 0;
+    }
+
+    /**
+     * Shared node-creation path used by both the right-click context menu and
+     * the command palette.
+     *
+     * Guards: canEdit check, End-uniqueness toast, and the `isDialogOpen` guard
+     * (skipped here because the palette has already closed by the time this is
+     * called from its `.closed` subscription).
+     *
+     * @param request  The creation request (type + optional overrides).
+     * @param screenPoint  A screen-space point used to derive the canvas position
+     *                     via `fFlowComponent.getPositionInFlow`. Pass the
+     *                     context-menu mouse position or the viewport-center point.
+     */
+    private createNodeAt(request: CreateNodeRequest, screenPoint: IPoint): void {
+        if (!this.canEdit()) {
+            return;
+        }
+
+        if (request.type === NodeType.END && this.flowService.hasEndNode()) {
+            this.toastService.warning('Only one End node is allowed', 4000, 'bottom-right');
+            return;
+        }
+
+        const position = this.fFlowComponent.getPositionInFlow(
+            PointExtensions.initialize(screenPoint.x, screenPoint.y)
+        );
+        const newNode = this.nodeFactory.createNode(request.type, { ...request.overrides, position });
+
+        this.undoRedoService.recordOp({
+            kind: 'add_node',
+            node: newNode,
+        } satisfies OpAddNode);
+        this.flowService.addNode(newNode);
+
+        if (!this.applyingRemote) {
+            this.collaborationPresenceService.sendNodeAdd({
+                node_key: this.nodeKey(newNode),
+                node: newNode,
+            });
+        }
     }
 
     private updateStartNodeInitialState(newState: Record<string, unknown>): void {
