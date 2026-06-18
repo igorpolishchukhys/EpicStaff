@@ -1,4 +1,4 @@
-import { DialogRef } from '@angular/cdk/dialog';
+import { DIALOG_DATA, DialogRef } from '@angular/cdk/dialog';
 import {
     AfterViewInit,
     ChangeDetectionStrategy,
@@ -17,7 +17,12 @@ import { FlowGraphBlock, NODE_BLOCKS } from '../../core/constants/node-blocks';
 import { getNodeTitle } from '../../core/enums/node-title.util';
 import { NodeType } from '../../core/enums/node-type';
 import { fuzzyMatch } from '../../core/helpers/fuzzy-match';
-import { EditorActionId, PaletteResult } from '../../core/models/command-palette.types';
+import {
+    CommandPaletteData,
+    EditorActionId,
+    MUTATING_EDITOR_ACTIONS,
+    PaletteResult,
+} from '../../core/models/command-palette.types';
 import { NodeModel } from '../../core/models/node.model';
 import { FlowService } from '../../services/flow.service';
 import { UndoRedoService } from '../../services/undo-redo.service';
@@ -30,6 +35,7 @@ import { UndoRedoService } from '../../services/undo-redo.service';
 interface PaletteNodeEntry extends FlowGraphBlock {
     kind: 'node';
     disabled: boolean;
+    hint?: string;
 }
 
 /** An action entry annotated with its disabled state for rendering. */
@@ -220,8 +226,8 @@ const ACTION_DEFINITIONS: readonly ActionDefinition[] = [
                                     [style.color]="entry.color"
                                 ></i>
                                 <span class="node-label">{{ entry.label }}</span>
-                                @if (entry.disabled) {
-                                    <span class="disabled-hint">Already added</span>
+                                @if (entry.hint) {
+                                    <span class="disabled-hint">{{ entry.hint }}</span>
                                 }
                             </li>
                         }
@@ -457,6 +463,7 @@ export class CommandPaletteComponent implements AfterViewInit {
         const query = this.querySignal() ?? '';
         const canUndo = this.undoRedo.canUndo();
         const canRedo = this.undoRedo.canRedo();
+        const canMutate = this.data.canMutate;
 
         const toEntry = (def: ActionDefinition): PaletteActionEntry => ({
             kind: 'action',
@@ -464,7 +471,10 @@ export class CommandPaletteComponent implements AfterViewInit {
             label: def.label,
             icon: def.icon,
             shortcut: def.shortcut,
-            disabled: (def.id === EditorActionId.Undo && !canUndo) || (def.id === EditorActionId.Redo && !canRedo),
+            disabled:
+                (MUTATING_EDITOR_ACTIONS.has(def.id) && !canMutate) ||
+                (def.id === EditorActionId.Undo && !canUndo) ||
+                (def.id === EditorActionId.Redo && !canRedo),
         });
 
         if (query.trim().length === 0) {
@@ -510,12 +520,17 @@ export class CommandPaletteComponent implements AfterViewInit {
     readonly filteredEntries = computed<PaletteNodeEntry[]>(() => {
         const query = this.querySignal() ?? '';
         const hasEnd = this.flowService.hasEndNode();
+        const canMutate = this.data.canMutate;
 
-        const toEntry = (block: FlowGraphBlock): PaletteNodeEntry => ({
-            ...block,
-            kind: 'node',
-            disabled: block.type === NodeType.END && hasEnd,
-        });
+        const toEntry = (block: FlowGraphBlock): PaletteNodeEntry => {
+            const endDisabled = block.type === NodeType.END && hasEnd;
+            return {
+                ...block,
+                kind: 'node',
+                disabled: endDisabled || !canMutate,
+                hint: endDisabled ? 'Already added' : undefined,
+            };
+        };
 
         if (query.trim().length === 0) {
             return NODE_BLOCKS.map(toEntry);
@@ -565,6 +580,7 @@ export class CommandPaletteComponent implements AfterViewInit {
     private readonly dialogRef = inject(DialogRef<PaletteResult>);
     private readonly flowService = inject(FlowService);
     private readonly undoRedo = inject(UndoRedoService);
+    private readonly data = inject<CommandPaletteData>(DIALOG_DATA);
 
     constructor() {
         // Reset highlight to first enabled row whenever the filter changes.
