@@ -56,6 +56,7 @@ import { CollaborationPresenceService } from '../../services/collaboration/colla
 import { ToastService } from '../../services/notifications/toast.service';
 import { AppSvgIconComponent } from '../../shared/components/app-svg-icon/app-svg-icon.component';
 import { CollabCursorLayerComponent } from '../components/collab-cursor-layer/collab-cursor-layer.component';
+import { CommandPaletteComponent } from '../components/command-palette/command-palette.component';
 import { DomainDialogComponent } from '../components/domain-dialog/domain-dialog.component';
 import { FlowActionPanelComponent } from '../components/flow-action-panel/flow-action-panel.component';
 import { FlowBaseNodeComponent } from '../components/flow-base-node/flow-base-node.component';
@@ -130,6 +131,7 @@ function waypointsEqual(a: IPoint[], b: IPoint[]): boolean {
     styleUrls: ['../styles/_variables.scss', './flow-graph.component.scss'],
     standalone: true,
     changeDetection: ChangeDetectionStrategy.OnPush,
+    host: { tabindex: '-1' },
     providers: [
         {
             provide: F_CONNECTION_BUILDERS,
@@ -288,6 +290,7 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     private readonly collaborationPresenceService = inject(CollaborationPresenceService);
     readonly collabPresentation = inject(CollabPresentationService);
     private readonly panelLockService = inject(PanelLockService);
+    private readonly hostRef = inject(ElementRef<HTMLElement>);
 
     /** Ids of nodes currently being dragged by the local user — used to ignore echo moves. */
     private readonly locallyDraggingNodeIds = new Set<string>();
@@ -1541,6 +1544,20 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
         this.dialog.open(FlowSettingsPanelComponent, {
             width: '480px',
             maxWidth: '90vw',
+        });
+    }
+
+    public onOpenCommandPalette(): void {
+        if (this.isDialogOpen()) {
+            return;
+        }
+
+        const dialogRef = this.dialog.open(CommandPaletteComponent, {
+            panelClass: 'command-palette-panel',
+        });
+
+        dialogRef.closed.subscribe(() => {
+            this.hostRef.nativeElement.focus();
         });
     }
 
