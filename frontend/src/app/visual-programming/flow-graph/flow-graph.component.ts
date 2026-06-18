@@ -95,6 +95,7 @@ import {
     getPortPosition,
     normalizeConnectionWaypoints,
 } from '../core/helpers/segment-avoidance.helper';
+import { EditorActionId, PaletteResult } from '../core/models/command-palette.types';
 import { ConnectionModel } from '../core/models/connection.model';
 import { FlowModel } from '../core/models/flow.model';
 import { GraphNoteModel, NodeModel, ProjectNodeModel, StartNodeModel } from '../core/models/node.model';
@@ -170,6 +171,7 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
 
     @Output() save = new EventEmitter<FlowModel>();
     readonly openShortcuts = output<DOMRect>();
+    readonly runRequested = output<void>();
 
     @ViewChild(FFlowComponent, { static: false })
     private fFlowComponent!: FFlowComponent;
@@ -184,6 +186,8 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
     private nodePanelShell?: NodePanelShellComponent;
 
     @ViewChild('arrangeBtnRef') private arrangeBtnRef?: ElementRef<HTMLButtonElement>;
+
+    @ViewChild('shortcutsAnchor') private shortcutsAnchorRef?: ElementRef<HTMLElement>;
 
     readonly GRID_CELL_SIZE = GRID_CELL_SIZE;
     protected readonly getMinimapClassForNode = getMinimapClassForNode;
@@ -1530,27 +1534,62 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
             return;
         }
 
-        const dialogRef = this.dialog.open<CreateNodeRequest>(CommandPaletteComponent, {
+        const dialogRef = this.dialog.open<PaletteResult>(CommandPaletteComponent, {
             panelClass: 'command-palette-panel',
         });
 
-        dialogRef.closed.subscribe((request: CreateNodeRequest | undefined) => {
+        dialogRef.closed.subscribe((result: PaletteResult | undefined) => {
             this.hostRef.nativeElement.focus();
 
-            if (!request) {
+            if (!result) {
                 return;
             }
 
-            // Compute viewport-center screen point from the host element bounds.
-            const rect = this.hostRef.nativeElement.getBoundingClientRect();
-            const centerScreenPoint = PointExtensions.initialize(
-                rect.left + rect.width / 2,
-                rect.top + rect.height / 2
-            );
+            if (result.kind === 'create-node') {
+                // Compute viewport-center screen point from the host element bounds.
+                const rect = this.hostRef.nativeElement.getBoundingClientRect();
+                const centerScreenPoint = PointExtensions.initialize(
+                    rect.left + rect.width / 2,
+                    rect.top + rect.height / 2
+                );
 
-            this.hasUnarrangedChanges.set(true);
-            this.createNodeAt(request, centerScreenPoint);
+                this.hasUnarrangedChanges.set(true);
+                this.createNodeAt(result.request, centerScreenPoint);
+            } else {
+                this.dispatchEditorAction(result.actionId);
+            }
         });
+    }
+
+    private dispatchEditorAction(actionId: EditorActionId): void {
+        switch (actionId) {
+            case EditorActionId.RunFlow:
+                this.runRequested.emit();
+                break;
+            case EditorActionId.Save:
+                this.emitSave();
+                break;
+            case EditorActionId.Undo:
+                this.onUndo();
+                break;
+            case EditorActionId.Redo:
+                this.onRedo();
+                break;
+            case EditorActionId.FitToScreen:
+                this.fCanvasComponent.fitToScreen({ x: 200, y: 100 }, true);
+                this.cd.detectChanges();
+                break;
+            case EditorActionId.OpenSettings:
+                this.openSettings();
+                break;
+            case EditorActionId.OpenShortcuts:
+                this.onOpenShortcuts(this.shortcutsAnchorRef?.nativeElement ?? this.hostRef.nativeElement);
+                break;
+            default: {
+                const _exhaustive: never = actionId;
+                console.warn('[FlowGraph] Unknown editor action:', _exhaustive);
+            }
+        }
     }
 
     public updateMouseTrackerPosition(event: IPoint): void {
