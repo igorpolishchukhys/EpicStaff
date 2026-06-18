@@ -1555,6 +1555,12 @@ export class FlowGraphComponent implements OnInit, OnChanges, OnDestroy {
 
                 this.hasUnarrangedChanges.set(true);
                 this.createNodeAt(result.request, centerScreenPoint);
+            } else if (result.kind === 'goto-node') {
+                const nodeExists = this.flowService.nodes().some((n) => n.id === result.nodeId);
+                if (nodeExists) {
+                    this.fCanvasComponent.centerGroupOrNode(result.nodeId, true);
+                    this.cd.detectChanges();
+                }
             } else {
                 this.dispatchEditorAction(result.actionId);
             }

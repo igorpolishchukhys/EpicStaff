@@ -12,4 +12,5 @@ export enum EditorActionId {
 
 export type PaletteResult =
     | { kind: 'create-node'; request: CreateNodeRequest }
-    | { kind: 'action'; actionId: EditorActionId };
+    | { kind: 'action'; actionId: EditorActionId }
+    | { kind: 'goto-node'; nodeId: string };
